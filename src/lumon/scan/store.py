@@ -10,6 +10,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from lumon.errors import InvalidInputError, PreflightError
 from lumon.scan.issues import with_issue_reviews
@@ -36,6 +37,41 @@ class ScanRunStore:
         directory.mkdir(parents=True, exist_ok=True)
         _secure_directory(directory)
         _atomic_write(directory / "run.json", run.as_payload())
+
+    def initialize_control(self, workspace: Path, run_id: str) -> None:
+        """Create the stop handshake before the running receipt is visible."""
+
+        directory = self.path_for(workspace, run_id)
+        expected_parent = workspace.resolve() / "lumon" / "runs" / "scans"
+        if directory.is_symlink() or directory.resolve().parent != expected_parent:
+            raise PreflightError("Auto Scan control directory is outside this Workspace.")
+        directory.mkdir(parents=True, exist_ok=True)
+        _secure_directory(directory)
+        _atomic_write(directory / "control.json", {"stopping": False})
+
+    def stop_requested(self, workspace: Path, run_id: str) -> bool | None:
+        """Return None when the worker does not support the stop handshake."""
+
+        path = self.path_for(workspace, run_id) / "control.json"
+        try:
+            payload: object = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        stopping: object = cast(dict[str, object], payload).get("stopping")
+        return stopping if isinstance(stopping, bool) else None
+
+    def request_stop(self, workspace: Path, run_id: str) -> None:
+        """Ask the owning worker to cancel its current Agent task."""
+
+        directory = self.path_for(workspace, run_id)
+        expected_parent = workspace.resolve() / "lumon" / "runs" / "scans"
+        if directory.is_symlink() or directory.resolve().parent != expected_parent:
+            raise PreflightError("Auto Scan control directory is outside this Workspace.")
+        if self.stop_requested(workspace, run_id) is None:
+            raise PreflightError("This Auto Scan does not support stopping; wait for it to finish.")
+        _atomic_write(directory / "control.json", {"stopping": True})
 
     def save_repository_baselines(
         self, workspace: Path, run_id: str, payload: Mapping[str, object]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -1766,6 +1767,56 @@ def test_scan_history_reconciles_abandoned_runs_without_inventing_elapsed_time(
     assert receipt["hook_results"] == []
     assert store.load(workspace, run.run_id).state is ScanState.FAILED
     assert client.get(f"/api/workspaces/{workspace_id}/scans").json() == response.json()
+
+
+def test_scan_stop_api_is_workspace_scoped_and_reports_the_control_state(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    client = _client(service)
+    client.base_url = httpx.URL("http://127.0.0.1:15778")
+    workspace = tmp_path / "workspace"
+    workspace_id = client.post(
+        "/api/workspaces/initialize", json={"path": str(workspace), "repositories": []}
+    ).json()["workspace_id"]
+    other_id = client.post(
+        "/api/workspaces/initialize", json={"path": str(tmp_path / "other"), "repositories": []}
+    ).json()["workspace_id"]
+    run = ScanRun.start("active", 7)
+    store = service.scan_service.run_store
+    store.initialize_control(workspace, run.run_id)
+    store.save(workspace, run)
+    lock_path = service.registry.layout.root / "locks" / f"scan-{workspace_id}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    endpoint = f"/api/workspaces/{workspace_id}/scans/{run.run_id}/stop"
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert client.get(f"/api/workspaces/{workspace_id}/scans").json()[0]["stopping"] is False
+        assert client.post(endpoint, headers={"Origin": "https://example.com"}).status_code == 403
+        assert client.post(endpoint.replace(workspace_id, other_id)).status_code == 409
+        assert client.post(endpoint.replace("active", "missing")).status_code == 409
+        assert client.post(endpoint).status_code == 202
+        assert client.post(endpoint).status_code == 202
+        assert client.get(f"/api/workspaces/{workspace_id}/scans").json()[0]["stopping"] is True
+        store.save(workspace, replace(run, state=ScanState.STOPPED, finished_at=run.started_at))
+        assert client.post(endpoint).status_code == 409
+    assert client.get(f"/api/workspaces/{workspace_id}/scans").json()[0]["state"] == "stopped"
+
+
+def test_scan_stop_api_rejects_a_worker_without_stop_support(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    client = _client(service)
+    workspace = tmp_path / "workspace"
+    workspace_id = client.post(
+        "/api/workspaces/initialize", json={"path": str(workspace), "repositories": []}
+    ).json()["workspace_id"]
+    service.scan_service.run_store.save(workspace, ScanRun.start("legacy", 7))
+    lock_path = service.registry.layout.root / "locks" / f"scan-{workspace_id}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert client.get(f"/api/workspaces/{workspace_id}/scans").json()[0]["stopping"] is None
+        response = client.post(f"/api/workspaces/{workspace_id}/scans/legacy/stop")
+        assert response.status_code == 409
+        assert "does not support stopping" in response.json()["error"]["message"]
 
 
 def test_register_existing_workspace_returns_registry_item(tmp_path: Path) -> None:

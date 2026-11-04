@@ -51,7 +51,7 @@ from lumon.flows.catalog import FlowCatalog, FlowValidationError
 from lumon.flows.model import FlowDefinition
 from lumon.flows.scheduler import FlowScheduler, LaunchdFlowScheduler
 from lumon.flows.service import FlowService
-from lumon.scan.model import ScanRun
+from lumon.scan.model import ScanRun, ScanState
 from lumon.scan.scheduler import LaunchdScanScheduler, ScanScheduler
 from lumon.scan.service import ScanService
 from lumon.tools.codex_mcp import CodexMcpManager, McpDiscovery, McpInventory, McpNewServer
@@ -584,6 +584,18 @@ class DashboardService:
         registration = self._require(workspace_id)
         runs = self.scan_service.list_runs(registration.path)
         return self.scan_service.run_store.with_ignored_findings(registration.path, runs)
+
+    def stop_scan(self, workspace_id: UUID, run_id: str) -> None:
+        """Request cancellation from the scan worker for this Workspace."""
+
+        self._require(workspace_id)
+        self.scan_service.request_stop(workspace_id, run_id)
+
+    def scan_stopping(self, workspace_id: UUID, run: ScanRun) -> bool | None:
+        if run.state != ScanState.RUNNING:
+            return None
+        workspace = self._require(workspace_id).path
+        return self.scan_service.run_store.stop_requested(workspace, run.run_id)
 
     def ignore_scan_finding(
         self, workspace_id: UUID, run_id: str, finding_index: int

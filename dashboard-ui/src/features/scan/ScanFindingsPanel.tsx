@@ -16,6 +16,7 @@ export function ScanFindingsPanel({ runs, loading, unavailable, onIgnore }: {
   const [ignoreError, setIgnoreError] = useState<string | null>(null);
   const latest = new Map<string, { finding: ScanFinding; run: ScanRun; index: number }>();
   for (const run of [...runs].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))) {
+    if (run.state === "stopped") continue;
     for (const [index, finding] of run.findings.entries()) {
       const id = finding.issue_id.trim();
       const key = JSON.stringify([finding.repository, id && id !== "untracked" ? id : [run.run_id, index]]);

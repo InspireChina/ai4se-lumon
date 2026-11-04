@@ -470,6 +470,7 @@ class ScanRunResponse(StrictModel):
     html_available: bool
     pdf_available: bool
     duration_seconds: int | None
+    stopping: bool | None = None
 
 
 class FlowSummaryResponse(StrictModel):

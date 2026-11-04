@@ -541,6 +541,11 @@ incomplete rather than silently reporting full coverage. The existing checkout a
 other worktrees keep their original Git history.
 Historical freshness claims for another commit are rejected. Clean scan worktrees
 are removed afterward; modified or unsafe ones are preserved and recorded.
+The Dashboard can stop a running manual or scheduled scan. It cancels the Agent,
+records the stopped state after cleanup, and skips the remaining hooks and Feishu
+notification. Repository preparation or report export already in progress finishes first;
+completed external actions are not undone. Scans started before this feature cannot
+be stopped from the Dashboard.
 Ignored issues are identity references only: they do not require repair rechecks,
 and missing or unsolicited assessments for them do not make a scan incomplete.
 An equivalent new candidate stays ignored and is excluded from new-finding hooks.

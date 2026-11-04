@@ -23,6 +23,18 @@ function run(run_id: string, started_at: string, findings: ScanFinding[]): ScanR
 beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); localStorage.setItem("lumon.locale", "en"); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); });
 
+it("keeps findings from a stopped scan out of the current issue list", async () => {
+  const stopped = { ...run("stopped", "2026-10-23T00:00:00Z", [{ ...finding, title: "Unfinished review" }]), state: "stopped" };
+  const completed = run("completed", "2026-10-22T00:00:00Z", [finding]);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<I18nProvider><ScanFindingsPanel runs={[stopped, completed]} loading={false} unavailable={false} /></I18nProvider>));
+    expect(container.textContent).toContain(finding.title);
+    expect(container.textContent).not.toContain("Unfinished review");
+  } finally { await act(async () => root.unmount()); }
+});
+
 it("confirms ignores, submits the exact occurrence once and shows saved status", async () => {
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
   let finish: () => void = () => {};

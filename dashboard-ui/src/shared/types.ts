@@ -303,6 +303,7 @@ export interface ScanRun {
   html_available: boolean;
   pdf_available: boolean;
   duration_seconds: number | null;
+  stopping?: boolean | null;
 }
 
 export interface AgentObservabilityUpdate {

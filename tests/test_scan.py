@@ -6,11 +6,15 @@ import asyncio
 import fcntl
 import json
 import os
+import select
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from typing import cast
 from uuid import UUID
 
@@ -18,14 +22,20 @@ import pytest
 
 from lumon.agents.agent.config import AgentConfig, AgentConfigStore
 from lumon.agents.agent.model import AgentResult
-from lumon.agents.agent.runner import AgentEventCallback, AgentRunner, ProgressCallback
-from lumon.errors import InvalidInputError, PreflightError
+from lumon.agents.agent.runner import (
+    AgentEventCallback,
+    AgentRunner,
+    CodexAgentRunner,
+    ProgressCallback,
+)
+from lumon.errors import AgentRuntimeError, InvalidInputError, PreflightError
 from lumon.scan.model import IssueReviewStatus, ScanFinding, ScanRun, ScanState
 from lumon.scan.notification import build_scan_card
 from lumon.scan.report import ReportResult, write_report
 from lumon.scan.service import ScanRepositories, ScanService
 from lumon.scan.store import ScanRunStore
 from lumon.skills.installer import SkillInstaller
+from lumon.tools.codex import CodexTool
 from lumon.tools.feishu_webhook import FeishuWebhookError, FeishuWebhookSender
 from lumon.tools.steering import SteeringControl
 from lumon.workspace.config import WorkspaceConfig
@@ -1241,6 +1251,263 @@ def test_scan_cancellation_saves_failure_before_releasing_lock(
     assert run.failures == ("Existing failure.", "Auto Scan was interrupted before completion.")
     assert "test-secret" not in json.dumps(run.as_payload())
     assert service.list_runs(workspace) == (run,)
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_stop_cancels_the_agent_and_keeps_the_scan_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+) -> None:
+    runner = _FakeRunner()
+    service, workspace, workspace_id = _scan_service(tmp_path, runner)
+    if not force:
+        service.settings_store.save(
+            WorkspaceSettings(workspace_id, auto_scan=AutoScanSettings(enabled=True))
+        )
+    started, cancelled, release = Event(), Event(), Event()
+
+    async def wait_for_stop(_workspace: Path, _prompt: str) -> AgentResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+            await asyncio.to_thread(release.wait, 5)
+        return AgentResult(status="succeeded", final_text="unreachable")
+
+    monkeypatch.setattr(runner, "run", wait_for_stop)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.run, workspace_id, force=force, run_id="stop-me")
+        assert started.wait(5)
+        assert service.run_store.stop_requested(workspace, "stop-me") is False
+        service.request_stop(workspace_id, "stop-me")
+        try:
+            assert cancelled.wait(5)
+            assert service.run_store.load(workspace, "stop-me").state is ScanState.RUNNING
+            service.request_stop(workspace_id, "stop-me")
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+
+    assert cancelled.is_set()
+    assert result.state is ScanState.STOPPED and result.finished_at is not None
+    assert result.phase == "review" and result.hook_results == ()
+    assert service.run_store.load(workspace, "stop-me") == result
+    with pytest.raises(PreflightError, match="No Auto Scan"):
+        service.request_stop(workspace_id, "stop-me")
+
+
+def test_stop_reports_failure_if_agent_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _FakeRunner()
+    service, workspace, workspace_id = _scan_service(tmp_path, runner)
+    started = Event()
+
+    async def fail_cleanup(_workspace: Path, _prompt: str) -> AgentResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise RuntimeError("Agent cleanup failed")
+
+    monkeypatch.setattr(runner, "run", fail_cleanup)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.run, workspace_id, force=True, run_id="cleanup-failure")
+        assert started.wait(5)
+        service.request_stop(workspace_id, "cleanup-failure")
+        with pytest.raises(AgentRuntimeError, match="could not stop cleanly"):
+            future.result(timeout=5)
+
+    assert service.run_store.load(workspace, "cleanup-failure").state is ScanState.FAILED
+
+
+def test_stop_during_repository_preparation_waits_for_cleanup_and_skips_agent(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner()
+    service, workspace, workspace_id = _scan_service(tmp_path, runner)
+    preparing, release = Event(), Event()
+
+    def prepare(
+        _workspace: Path, _records: tuple[RepositoryRecord, ...], _task: str, _since: datetime
+    ) -> ScanRepositories:
+        preparing.set()
+        assert release.wait(5)
+        return ScanRepositories((), ())
+
+    service.prepare_repositories = prepare
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.run, workspace_id, force=True, run_id="preparing")
+        try:
+            assert preparing.wait(5)
+            service.request_stop(workspace_id, "preparing")
+            assert service.run_store.load(workspace, "preparing").state is ScanState.RUNNING
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+    assert result.state is ScanState.STOPPED
+    assert result.hook_results == ()
+    assert runner.prompts == []
+
+
+def test_stop_during_report_keeps_the_report_and_skips_completion_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _FakeRunner()
+    service, workspace, workspace_id = _scan_service(tmp_path, runner)
+    service.settings_store.save(
+        WorkspaceSettings(
+            workspace_id, auto_scan=AutoScanSettings(trigger_hooks=("Create a Jira issue",))
+        )
+    )
+    reporting, release = Event(), Event()
+
+    def report(_run: ScanRun, directory: Path) -> ReportResult:
+        (directory / "report.html").write_text("partial report", encoding="utf-8")
+        reporting.set()
+        assert release.wait(5)
+        return ReportResult("report.html", None)
+
+    monkeypatch.setattr("lumon.scan.service.write_report", report)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.run, workspace_id, force=True, run_id="report-stop")
+        try:
+            assert reporting.wait(5)
+            service.request_stop(workspace_id, "report-stop")
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+    assert result.state is ScanState.STOPPED and result.phase == "report"
+    assert result.findings and result.html_path == "report.html" and result.hook_results == ()
+    assert (service.run_store.path_for(workspace, result.run_id) / "report.html").is_file()
+    assert len(runner.prompts) == 1
+
+
+def test_stop_during_completion_hooks_keeps_review_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _FakeRunner()
+    service, _workspace, workspace_id = _scan_service(tmp_path, runner)
+    service.settings_store.save(
+        WorkspaceSettings(
+            workspace_id, auto_scan=AutoScanSettings(trigger_hooks=("Create a Jira issue",))
+        )
+    )
+    started, cancelled = Event(), Event()
+    original_run = runner.run
+
+    async def wait_in_hook(workspace: Path, prompt: str) -> AgentResult:
+        if "Configured completion hooks:" not in prompt:
+            return await original_run(workspace, prompt)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return AgentResult(status="succeeded", final_text="unreachable")
+
+    def report(_run: ScanRun, directory: Path) -> ReportResult:
+        (directory / "report.html").write_text("report", encoding="utf-8")
+        return ReportResult("report.html", None)
+
+    monkeypatch.setattr(runner, "run", wait_in_hook)
+    monkeypatch.setattr("lumon.scan.service.write_report", report)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.run, workspace_id, force=True, run_id="hooks-stop")
+        assert started.wait(5)
+        service.request_stop(workspace_id, "hooks-stop")
+        result = future.result(timeout=5)
+    assert cancelled.is_set()
+    assert result.state is ScanState.STOPPED and result.phase == "hooks"
+    assert result.findings and result.html_path == "report.html" and result.hook_results == ()
+
+
+def test_agent_cannot_claim_that_the_user_stopped_a_scan(tmp_path: Path) -> None:
+    runner = _FakeRunner(
+        review_payload={"scan_status": "stopped", "findings": [], "repositories_scanned": 0}
+    )
+    service, _workspace, workspace_id = _scan_service(tmp_path, runner)
+
+    result = service.run(workspace_id, force=True)
+
+    assert result.state is ScanState.COMPLETED
+
+
+def test_stop_reaches_a_scheduled_worker_in_another_process(tmp_path: Path) -> None:
+    service, workspace, workspace_id = _scan_service(tmp_path)
+    service.settings_store.save(
+        WorkspaceSettings(workspace_id, auto_scan=AutoScanSettings(enabled=True))
+    )
+    script = "\n".join(
+        (
+            "import asyncio, sys",
+            "from pathlib import Path",
+            "from uuid import UUID",
+            "from lumon.scan.service import ScanService",
+            "class Runner:",
+            "    async def run(self, workspace, prompt, **kwargs):",
+            "        print('started', flush=True)",
+            "        await asyncio.Event().wait()",
+            "result = ScanService(state_root=Path(sys.argv[1]), runner=Runner()).run(",
+            "    UUID(sys.argv[2]), run_id='external')",
+            "print(result.state.value, flush=True)",
+        )
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(service.state_root), str(workspace_id)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        assert select.select([process.stdout], [], [], 10)[0]
+        assert process.stdout.readline().strip() == "started"
+        service.request_stop(workspace_id, "external")
+        assert process.wait(timeout=8) == 0
+        assert process.stdout.readline().strip() == "stopped"
+        assert service.run_store.load(workspace, "external").state is ScanState.STOPPED
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def test_stop_terminates_the_codex_process_and_its_child(tmp_path: Path) -> None:
+    parent_file, child_file = tmp_path / "parent.pid", tmp_path / "child.pid"
+    fake = tmp_path / "fake-codex"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "sys.stdin.read()\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "start_new_session=True)\n"
+        f"Path({str(parent_file)!r}).write_text(str(os.getpid()))\n"
+        f"Path({str(child_file)!r}).write_text(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    runner = CodexAgentRunner(tool=CodexTool(binary=str(fake), timeout_seconds=30))
+    service, workspace, workspace_id = _scan_service(tmp_path, runner)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.run, workspace_id, force=True, run_id="codex-stop")
+        deadline = time.monotonic() + 10
+        while not child_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert parent_file.is_file() and child_file.is_file()
+        parent_pid, child_pid = int(parent_file.read_text()), int(child_file.read_text())
+        service.request_stop(workspace_id, "codex-stop")
+        assert future.result(timeout=8).state is ScanState.STOPPED
+    for pid in (parent_pid, child_pid):
+        status = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        assert not status or status.startswith("Z")
+    assert service.run_store.load(workspace, "codex-stop").state is ScanState.STOPPED
 
 
 def test_next_scan_recovers_abandoned_history_before_running_agent(

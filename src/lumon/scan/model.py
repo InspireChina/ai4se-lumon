@@ -20,6 +20,7 @@ class ScanState(StrEnum):
     COMPLETED_WITH_FINDINGS = "completed_with_findings"
     COMPLETED_WITH_FAILURES = "completed_with_failures"
     FAILED = "failed"
+    STOPPED = "stopped"
 
 
 class IssueReviewStatus(StrEnum):

@@ -327,6 +327,10 @@ export const dashboardApi = {
     return request<ScanRun>(`/api/workspaces/${workspaceId}/scans`, { method: "POST" });
   },
 
+  stopScan(workspaceId: string, runId: string): Promise<{ accepted: boolean }> {
+    return request(`/api/workspaces/${workspaceId}/scans/${encodeURIComponent(runId)}/stop`, { method: "POST" });
+  },
+
   ignoreScanFinding(workspaceId: string, runId: string, findingIndex: number): Promise<ScanRun[]> {
     return request<ScanRun[]>(`/api/workspaces/${workspaceId}/scans/${encodeURIComponent(runId)}/findings/${findingIndex}/ignore`, { method: "POST", body: JSON.stringify({ ignored: true }) });
   },

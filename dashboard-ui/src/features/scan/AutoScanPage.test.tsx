@@ -221,12 +221,76 @@ it("prioritizes a running scan over newer history and refreshes without starting
   try {
     await act(async () => root.render(<I18nProvider><AutoScanPage workspaceId="workspace-id" onError={vi.fn()} /></I18nProvider>));
     expect(container.querySelector(".scan-progress-panel [aria-current=step]")?.textContent).toContain("Generate reports");
-    await act(async () => container.querySelector<HTMLButtonElement>(".scan-progress-panel button")!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".scan-progress-panel .panel-actions button:last-child")!.click());
     expect(list).toHaveBeenCalledTimes(2);
     expect(start).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());
     vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear();
+  }
+});
+
+it("requests one stop and waits for the worker to report a stopped scan", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.setItem("lumon.locale", "en");
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const active: ScanRun = {
+    run_id: "active", state: "running", phase: "review", started_at: new Date().toISOString(),
+    finished_at: null, lookback_days: 7, repositories_scanned: 0, repositories_failed: 0,
+    findings: [], failures: [], hook_results: [], html_available: false, pdf_available: false,
+    duration_seconds: null, stopping: false,
+  };
+  const list = vi.spyOn(dashboardApi, "listScans").mockResolvedValue([active]);
+  let accept!: (result: { accepted: boolean }) => void;
+  const stop = vi.spyOn(dashboardApi, "stopScan").mockReturnValue(new Promise((resolve) => { accept = resolve; }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<I18nProvider><AutoScanPage workspaceId="workspace-id" onError={vi.fn()} /></I18nProvider>));
+    const button = container.querySelector<HTMLButtonElement>(".scan-progress-panel .panel-actions button")!;
+    expect(button.textContent).toBe("Stop");
+    await act(async () => button.click());
+    expect(stop).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await act(async () => button.click());
+    expect(stop).toHaveBeenCalledExactlyOnceWith("workspace-id", "active");
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Stopping…");
+    await act(async () => accept({ accepted: true }));
+    expect(button.disabled).toBe(true);
+    expect(container.querySelector(".scan-progress-panel .status-pill.status-warning")?.textContent).toContain("Live");
+    list.mockResolvedValue([{ ...active, state: "stopped", stopping: null, duration_seconds: 12 }]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(container.querySelector(".scan-progress-panel .status-neutral")?.textContent).toBe("Stopped");
+    expect(container.querySelectorAll(".scan-progress-panel .panel-actions button")).toHaveLength(1);
+  } finally {
+    await act(async () => root.unmount());
+    vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); localStorage.clear();
+  }
+});
+
+it("does not offer a working stop control for scans started before stop support", async () => {
+  const active: ScanRun = {
+    run_id: "legacy", state: "running", phase: "review", started_at: new Date().toISOString(),
+    finished_at: null, lookback_days: 7, repositories_scanned: 0, repositories_failed: 0,
+    findings: [], failures: [], hook_results: [], html_available: false, pdf_available: false,
+    duration_seconds: null, stopping: null,
+  };
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.setItem("lumon.locale", "en");
+  const list = vi.spyOn(dashboardApi, "listScans").mockResolvedValue([active]);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<I18nProvider><AutoScanPage workspaceId="workspace-id" onError={vi.fn()} /></I18nProvider>));
+    const button = container.querySelector<HTMLButtonElement>(".scan-progress-panel .panel-actions button")!;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain("started before the update");
+  } finally {
+    await act(async () => root.unmount());
+    list.mockRestore(); vi.unstubAllGlobals(); localStorage.clear();
   }
 });
 

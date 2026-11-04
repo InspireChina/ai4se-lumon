@@ -175,7 +175,7 @@ def test_missing_recheck_retains_last_state_and_successful_recheck_can_reopen(
     )
 
 
-@pytest.mark.parametrize("state", [ScanState.RUNNING, ScanState.FAILED])
+@pytest.mark.parametrize("state", [ScanState.RUNNING, ScanState.FAILED, ScanState.STOPPED])
 def test_unfinished_or_failed_receipts_do_not_change_history(
     tmp_path: Path, state: ScanState
 ) -> None:
@@ -184,6 +184,12 @@ def test_unfinished_or_failed_receipts_do_not_change_history(
     assert review is not None
     runs = (_run(0, findings=(_finding(),)), replace(_run(1, reviews=(review,)), state=state))
     assert store.with_ignored_findings(tmp_path, runs)[0].findings[0].issue_status == "open"
+
+
+def test_stopped_scan_does_not_add_unfinished_findings_to_future_rechecks() -> None:
+    completed = _run(0, findings=(_finding(),))
+    stopped = replace(_run(1, findings=(_finding(issue_id="UNFINISHED"),)), state=ScanState.STOPPED)
+    assert latest_findings((completed, stopped)) == completed.findings
 
 
 def test_old_resolved_and_ignored_history_remains_available_for_matching() -> None:

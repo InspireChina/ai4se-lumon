@@ -551,7 +551,11 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
         response_model=list[ScanRunResponse],
     )
     def list_scans(request: Request, workspace_id: UUID) -> list[ScanRunResponse]:
-        return [_scan_response(item) for item in _service(request).scans(workspace_id)]
+        service = _service(request)
+        return [
+            _scan_response(item, service.scan_stopping(workspace_id, item))
+            for item in service.scans(workspace_id)
+        ]
 
     @router.post(
         "/workspaces/{workspace_id}/scans",
@@ -560,6 +564,12 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
     )
     def start_scan(request: Request, workspace_id: UUID) -> ScanRunResponse:
         return _scan_response(_service(request).start_scan(workspace_id))
+
+    @router.post("/workspaces/{workspace_id}/scans/{run_id}/stop", status_code=202)
+    def stop_scan(request: Request, workspace_id: UUID, run_id: str) -> dict[str, bool]:
+        _require_local_origin(request)
+        _service(request).stop_scan(workspace_id, run_id)
+        return {"accepted": True}
 
     @router.post(
         "/workspaces/{workspace_id}/scans/{run_id}/findings/{finding_index}/ignore",
@@ -573,8 +583,9 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
         payload: ScanFindingIgnoreRequest,
     ) -> list[ScanRunResponse]:
         del payload
-        runs = _service(request).ignore_scan_finding(workspace_id, run_id, finding_index)
-        return [_scan_response(run) for run in runs]
+        service = _service(request)
+        runs = service.ignore_scan_finding(workspace_id, run_id, finding_index)
+        return [_scan_response(run, service.scan_stopping(workspace_id, run)) for run in runs]
 
     @router.get("/workspaces/{workspace_id}/scans/{run_id}/artifacts/{kind}")
     def scan_artifact(
@@ -851,7 +862,7 @@ def _settings_response(settings: WorkspaceSettingsView) -> WorkspaceSettingsResp
     )
 
 
-def _scan_response(run: ScanRun) -> ScanRunResponse:
+def _scan_response(run: ScanRun, stopping: bool | None = None) -> ScanRunResponse:
     return ScanRunResponse(
         run_id=run.run_id,
         state=run.state.value,
@@ -867,6 +878,7 @@ def _scan_response(run: ScanRun) -> ScanRunResponse:
         html_available=run.html_path is not None,
         pdf_available=run.pdf_path is not None,
         duration_seconds=run.duration_seconds,
+        stopping=stopping,
     )
 
 

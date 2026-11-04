@@ -22,7 +22,7 @@ def latest_findings(runs: tuple[ScanRun, ...]) -> tuple[ScanFinding, ...]:
 
     latest: dict[tuple[str, str], ScanFinding] = {}
     for run in sorted(runs, key=lambda item: item.started_at, reverse=True):
-        if run.state in {ScanState.RUNNING, ScanState.FAILED}:
+        if run.state in {ScanState.RUNNING, ScanState.FAILED, ScanState.STOPPED}:
             continue
         for finding in run.findings:
             latest.setdefault((finding.repository, finding.issue_id), finding)
@@ -132,7 +132,7 @@ def with_issue_reviews(runs: tuple[ScanRun, ...]) -> tuple[ScanRun, ...]:
     settled = tuple(
         run
         for run in sorted(runs, key=lambda item: item.started_at)
-        if run.state not in {ScanState.RUNNING, ScanState.FAILED}
+        if run.state not in {ScanState.RUNNING, ScanState.FAILED, ScanState.STOPPED}
     )
     matches = tuple(match for run in settled for match in run.issue_matches)
     aliases = issue_aliases(matches)

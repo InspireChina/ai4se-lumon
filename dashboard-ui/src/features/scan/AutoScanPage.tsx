@@ -18,6 +18,7 @@ export function AutoScanPage({
   const { formatDate, t } = useI18n();
   const [runs, setRuns] = useState<ScanRun[]>([]);
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyUnavailable, setHistoryUnavailable] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -90,6 +91,20 @@ export function AutoScanPage({
     }
   }
 
+  async function stopScan(run: ScanRun): Promise<void> {
+    if (stopping || run.stopping !== false || !window.confirm(t("autoScan.stopConfirm"))) return;
+    setStopping(run.run_id);
+    onError(null);
+    try {
+      await dashboardApi.stopScan(workspaceId, run.run_id);
+      setRuns((current) => current.map((item) => item.run_id === run.run_id ? { ...item, stopping: true } : item));
+    } catch (reason: unknown) {
+      onError(reason instanceof ApiError ? reason.message : t("app.dashboardRequestFailed"));
+    } finally {
+      setStopping(null);
+    }
+  }
+
   return (
     <div className="page-stack">
       <div className="page-heading">
@@ -98,7 +113,7 @@ export function AutoScanPage({
         </div>
       </div>
 
-      <ScanProgressPanel run={current} loading={historyLoading} unavailable={historyUnavailable} onRefresh={() => setRefresh((value) => value + 1)} />
+      <ScanProgressPanel run={current} loading={historyLoading} unavailable={historyUnavailable} stopping={stopping === current?.run_id} onStop={() => { if (current) void stopScan(current); }} onRefresh={() => setRefresh((value) => value + 1)} />
       <section className="panel scan-history-panel">
         <div className="panel-heading">
           <h2>{t("autoScan.historyTitle")}</h2>

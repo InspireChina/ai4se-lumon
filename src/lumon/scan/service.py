@@ -18,7 +18,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 from lumon.agents.agent.config import AgentConfigStore
-from lumon.agents.agent.model import WorkspaceContext
+from lumon.agents.agent.model import AgentResult, WorkspaceContext
 from lumon.agents.agent.prompt import render_automation_prompt
 from lumon.agents.agent.runner import AgentRunner, create_agent_runner
 from lumon.agents.agent.workspace_context import WorkspaceContextBuilder
@@ -43,6 +43,10 @@ from lumon.workspace.repository_worktree import (
 from lumon.workspace.settings import WorkspaceSettings, WorkspaceSettingsStore
 
 logger = logging.getLogger(__name__)
+
+
+class _ScanStopped(Exception):
+    """The owning scan worker acknowledged a stop request."""
 
 
 class ScanService:
@@ -94,6 +98,21 @@ class ScanService:
 
         return self.run_store.artifact_path(workspace, run_id, kind)
 
+    def request_stop(self, workspace_id: UUID, run_id: str) -> None:
+        """Request a stop only for the active scan in the selected Workspace."""
+
+        registration = self.registry.find(workspace_id)
+        if registration is None:
+            raise PreflightError(f"Workspace is not registered: {workspace_id}")
+        workspace = registration.path
+        with _scan_lock(self.state_root, workspace_id, skip_if_busy=True) as acquired:
+            if acquired:
+                self._recover_interrupted_runs(workspace)
+                raise PreflightError("No Auto Scan is currently running in this Workspace.")
+            if self.run_store.load(workspace, run_id).state != ScanState.RUNNING:
+                raise PreflightError("Only an active Auto Scan can be stopped.")
+            self.run_store.request_stop(workspace, run_id)
+
     def run(
         self,
         workspace_id: UUID,
@@ -114,9 +133,15 @@ class ScanService:
         with _scan_lock(self.state_root, workspace_id):
             self._recover_interrupted_runs(workspace)
             run = ScanRun.start(run_id or uuid4().hex, settings.auto_scan.lookback_days)
+            self.run_store.initialize_control(workspace, run.run_id)
             self.run_store.save(workspace, run)
             try:
                 result = self._run_locked(workspace, workspace_id, settings, run)
+            except _ScanStopped:
+                current = self.run_store.load(workspace, run.run_id)
+                stopped = replace(current, state=ScanState.STOPPED, finished_at=_now())
+                self.run_store.save(workspace, stopped)
+                return stopped
             except (KeyboardInterrupt, asyncio.CancelledError):
                 self._save_failed(
                     workspace,
@@ -187,6 +212,7 @@ class ScanService:
         """Execute the Agent review, report, and optional post-scan hooks."""
 
         config = self.agent_config_store.load()
+        self._raise_if_stopping(workspace, run.run_id)
         if not config.enabled:
             raise PreflightError("The Lumon Agent is disabled.")
         context_builder = WorkspaceContextBuilder(
@@ -203,6 +229,7 @@ class ScanService:
         prepared = self.prepare_repositories(workspace, records, task, since)
         try:
             _write_repository_receipt(self.run_store, workspace, run.run_id, prepared)
+            self._raise_if_stopping(workspace, run.run_id)
             return self._run_prepared(
                 workspace, settings, run, context_builder, context, records, prepared, task
             )
@@ -258,7 +285,7 @@ class ScanService:
             ),
         )
         runner = self.runner or create_agent_runner(context_builder.config)
-        result = asyncio.run(runner.run(workspace, prompt))
+        result = asyncio.run(self._run_agent(runner, workspace, prompt, run.run_id))
         if result.status != "succeeded":
             detail = sanitize_output(
                 result.failure_diagnostic or "The Auto Scan Agent did not complete."
@@ -297,6 +324,7 @@ class ScanService:
             for record in load_workspace_config(context.workspace_config_path).repositories
         }
         reviewed = _reviewed_run(run, payload, len(context.repositories), existing, branches)
+        self._raise_if_stopping(workspace, run.run_id)
         self.run_store.save(
             workspace, replace(reviewed, state=ScanState.RUNNING, phase="report", finished_at=None)
         )
@@ -304,6 +332,19 @@ class ScanService:
         failures = list(reviewed.failures)
         if report.error:
             failures.append(f"PDF report: {report.error}")
+        self.run_store.save(
+            workspace,
+            replace(
+                reviewed,
+                state=ScanState.RUNNING,
+                phase="report",
+                finished_at=None,
+                html_path=report.html_path,
+                pdf_path=report.pdf_path,
+                failures=tuple(failures),
+            ),
+        )
+        self._raise_if_stopping(workspace, run.run_id)
         completed = replace(
             reviewed,
             html_path=report.html_path,
@@ -344,8 +385,38 @@ class ScanService:
             finished_at=_now(),
             phase="completed",
         )
+        self._raise_if_stopping(workspace, run.run_id)
         self.run_store.save(workspace, final)
         return final
+
+    def _raise_if_stopping(self, workspace: Path, run_id: str) -> None:
+        if self.run_store.stop_requested(workspace, run_id):
+            raise _ScanStopped
+
+    async def _run_agent(
+        self, runner: AgentRunner, workspace: Path, prompt: str, run_id: str
+    ) -> AgentResult:
+        self._raise_if_stopping(workspace, run_id)
+        task = asyncio.create_task(runner.run(workspace, prompt))
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=0.2)
+                if self.run_store.stop_requested(workspace, run_id):
+                    task.cancel()
+                    outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+                    if isinstance(outcome, BaseException) and not isinstance(
+                        outcome, asyncio.CancelledError
+                    ):
+                        raise AgentRuntimeError(
+                            "Auto Scan Agent could not stop cleanly."
+                        ) from outcome
+                    raise _ScanStopped
+            self._raise_if_stopping(workspace, run_id)
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def _run_completion_hooks(
         self,
@@ -363,7 +434,7 @@ class ScanService:
             (),
             _hook_prompt(run, hooks),
         )
-        result = asyncio.run(runner.run(workspace, prompt))
+        result = asyncio.run(self._run_agent(runner, workspace, prompt, run.run_id))
         if result.status != "succeeded":
             detail = sanitize_output(
                 result.failure_diagnostic or "completion hook Agent turn failed"
@@ -627,6 +698,8 @@ def _state_from_payload(
     try:
         state = ScanState(value)
     except ValueError:
+        state = ScanState.COMPLETED_WITH_FINDINGS if findings else ScanState.COMPLETED
+    if state == ScanState.STOPPED:
         state = ScanState.COMPLETED_WITH_FINDINGS if findings else ScanState.COMPLETED
     if failures and state in {ScanState.COMPLETED, ScanState.COMPLETED_WITH_FINDINGS}:
         return ScanState.COMPLETED_WITH_FAILURES

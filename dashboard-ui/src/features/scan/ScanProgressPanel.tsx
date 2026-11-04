@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Clock3, LoaderCircle, RefreshCw } from "lucide-react";
+import { AlertCircle, Check, Clock3, LoaderCircle, RefreshCw, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../shared/i18n";
 import type { ScanRun } from "../../shared/types";
@@ -6,10 +6,12 @@ import { ScanFailureDetails } from "./ScanFailureDetails";
 
 const stages = ["review", "report", "hooks"] as const;
 
-export function ScanProgressPanel({ run, loading, unavailable, onRefresh }: {
+export function ScanProgressPanel({ run, loading, unavailable, stopping = false, onStop, onRefresh }: {
   run: ScanRun | null;
   loading: boolean;
   unavailable: boolean;
+  stopping?: boolean;
+  onStop?: () => void;
   onRefresh: () => void;
 }): React.JSX.Element {
   const { locale, t } = useI18n();
@@ -39,6 +41,9 @@ export function ScanProgressPanel({ run, loading, unavailable, onRefresh }: {
       <h2>{t("autoScan.progress")}</h2>
       <div className="panel-actions">
         {live && <span className="status-pill status-warning"><Clock3 size={13} aria-hidden="true" />{t("autoDelivery.live")}</span>}
+        {live && <button className="button button-secondary" type="button" onClick={onStop} disabled={loading || unavailable || stopping || run.stopping !== false} title={run.stopping == null ? t("autoScan.stopUnavailable") : undefined}>
+          {stopping || run.stopping ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <Square size={15} aria-hidden="true" />}{t(stopping || run.stopping ? "autoScan.stopping" : "autoScan.stop")}
+        </button>}
         <button className="button button-secondary" type="button" disabled={loading} onClick={onRefresh}><RefreshCw size={15} aria-hidden="true" />{t("overview.refresh")}</button>
       </div>
     </div>
@@ -58,7 +63,7 @@ export function ScanProgressPanel({ run, loading, unavailable, onRefresh }: {
             const running = active && live;
             const failed = active && run.state === "failed";
             return <li key={stage} className={complete ? "is-complete" : active ? `is-active ${running ? "is-running" : ""} ${failed ? "is-failed" : ""}` : ""} aria-current={active ? "step" : undefined}>
-              <span className="delivery-stage-marker">{complete ? <Check size={13} aria-hidden="true" /> : running ? <LoaderCircle size={13} className="spin" aria-hidden="true" /> : active && !live ? <AlertCircle size={13} aria-hidden="true" /> : index + 1}</span>
+              <span className="delivery-stage-marker">{complete ? <Check size={13} aria-hidden="true" /> : running ? <LoaderCircle size={13} className="spin" aria-hidden="true" /> : active && run.state === "stopped" ? <Square size={13} aria-hidden="true" /> : active && !live ? <AlertCircle size={13} aria-hidden="true" /> : index + 1}</span>
               <span>{labels[stage]}</span>
             </li>;
           })}
@@ -70,13 +75,13 @@ export function ScanProgressPanel({ run, loading, unavailable, onRefresh }: {
 
 export function ScanStatus({ run }: { run: ScanRun }): React.JSX.Element {
   const { t } = useI18n();
-  const tone = run.state === "completed" ? "status-ready" : run.state === "failed" ? "status-danger" : "status-warning";
+  const tone = run.state === "completed" ? "status-ready" : run.state === "failed" ? "status-danger" : run.state === "stopped" ? "status-neutral" : "status-warning";
   const labels: Record<string, string> = {
     running: t("autoScan.running"), completed: t("autoScan.completed"),
     completed_with_findings: t("autoScan.completed_with_findings"),
-    completed_with_failures: t("autoScan.completed_with_failures"), failed: t("autoScan.failed"),
+    completed_with_failures: t("autoScan.completed_with_failures"), failed: t("autoScan.failed"), stopped: t("autoScan.stopped"),
   };
-  return <span className={`status-pill ${tone}`} title={run.failures.join("\n") || undefined}>{labels[run.state] ?? run.state}</span>;
+  return <span className={`status-pill ${tone}`} title={run.failures.join("\n") || undefined}>{run.state === "running" && run.stopping ? t("autoScan.stopping") : labels[run.state] ?? run.state}</span>;
 }
 
 function scanDuration(run: ScanRun, now: number): string {
