@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import os
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -530,7 +531,9 @@ def test_scan_does_not_recheck_excluded_repository_history(tmp_path: Path) -> No
     assert "Excluded history marker" not in runner.prompts[0]
 
 
-def _local_repository(tmp_path: Path, workspace: Path) -> tuple[Path, RepositoryRecord]:
+def _local_repository(
+    tmp_path: Path, workspace: Path, *, old_initial: bool = False
+) -> tuple[Path, RepositoryRecord]:
     source = tmp_path / "upstream"
     remote = tmp_path / "remote.git"
     source.mkdir()
@@ -544,6 +547,16 @@ def _local_repository(tmp_path: Path, workspace: Path) -> tuple[Path, Repository
     (source / "file.txt").write_text("old\n", encoding="utf-8")
     git("-C", str(source), "add", "file.txt")
     git("-C", str(source), "commit", "-qm", "initial")
+    if old_initial:
+        date = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        env = os.environ.copy()
+        env["GIT_COMMITTER_DATE"] = date
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "--amend", "--no-edit", f"--date={date}"],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
     git("clone", "-q", "--bare", str(source), str(remote))
     git("clone", "-q", remote.as_uri(), str(workspace / "repos" / "app"))
     git("-C", str(source), "remote", "add", "origin", remote.as_uri())
@@ -671,7 +684,7 @@ def test_scan_reports_shallow_history_as_incomplete(
 ) -> None:
     runner = _FakeRunner(has_findings=False)
     fake_service, workspace, workspace_id = _scan_service(tmp_path, cast(AgentRunner, runner))
-    _source, record = _local_repository(tmp_path, workspace)
+    _source, record = _local_repository(tmp_path, workspace, old_initial=True)
     checkout = workspace / record.path
     checkout.rename(checkout.with_name("app-original"))
     subprocess.run(
@@ -681,7 +694,7 @@ def test_scan_reports_shallow_history_as_incomplete(
     )
     WorkspaceConfig("scan-recovery", (record,)).write(workspace / "lumon" / "workspace.toml")
     service = ScanService(state_root=fake_service.state_root, runner=cast(AgentRunner, runner))
-    monkeypatch.setattr("lumon.workspace.repository_worktree._HISTORY_DEEPEN_STEPS", ())
+    monkeypatch.setattr("lumon.workspace.repository_worktree._SCAN_BOUNDARY_DEEPEN_STEPS", ())
 
     def no_report(_run: ScanRun, _directory: Path) -> ReportResult:
         return ReportResult(None, None)

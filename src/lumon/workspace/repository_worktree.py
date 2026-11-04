@@ -27,6 +27,7 @@ HistoryIssue = Literal["deepen_failed", "deepen_limit"]
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _HISTORY_DEEPEN_STEPS = (256, 1024)
+_SCAN_BOUNDARY_DEEPEN_STEPS = (1, 4, 16, 64, 256, 1024)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,7 @@ class PreparedWorktree:
     shallow: bool = False
     history_covered: bool | None = None
     history_issue: HistoryIssue | None = None
+    isolated_history: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-safe preparation receipt without remote URLs."""
@@ -89,7 +91,40 @@ def prepare_worktree(
             _clone_registered_repository(root, source, repository)
         if source.is_symlink() or not source.is_dir():
             raise PreflightError(f"Repository '{repository.name}' is missing or unsafe.")
+        if mode == "read" and history_since is not None:
+            return _prepare_history_read(root, source, destination, repository, task, history_since)
         return _prepare_locked(source, destination, repository, task, mode, history_since)
+
+
+def _prepare_history_read(
+    root: Path,
+    source: Path,
+    destination: Path,
+    repository: RepositoryRecord,
+    task: str,
+    since: datetime,
+) -> PreparedWorktree:
+    _verify_source(source, repository)
+    validate_clone_url(repository.url)
+    history_source = _history_source(destination)
+    _validate_destination(root, history_source)
+    if destination.exists() or history_source.exists():
+        raise PreflightError("The task worktree already exists; existing files were preserved.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _git(source, "clone", "--bare", "--shared", "--", str(source), str(history_source))
+        _git(history_source, "remote", "set-url", "--", "origin", repository.url)
+        return _prepare_locked(
+            history_source, destination, repository, task, "read", since, isolated_history=True
+        )
+    except (PreflightError, OSError):
+        if not destination.exists() and history_source.is_dir() and not history_source.is_symlink():
+            shutil.rmtree(history_source)
+        raise
+
+
+def _history_source(destination: Path) -> Path:
+    return destination.with_name(f".{destination.name}-history.git")
 
 
 def _clone_registered_repository(root: Path, source: Path, repository: RepositoryRecord) -> None:
@@ -168,9 +203,22 @@ def remove_read_worktree(
     if not verify_read_worktree(workspace, repository, task, prepared):
         return False
     root = WorkspaceLayout.from_root(workspace).root
-    source = root / repository.path
+    source = _history_source(_worktree_path(root, repository.name, task, "read"))
+    if not prepared.isolated_history:
+        source = root / repository.path
     destination = _worktree_path(root, repository.name, task, "read")
+    if prepared.isolated_history:
+        worktrees = _git(source, "worktree", "list", "--porcelain").stdout.splitlines()
+        paths = {
+            line.removeprefix("worktree ") for line in worktrees if line.startswith("worktree ")
+        }
+        if paths != {str(source.resolve()), str(destination.resolve())}:
+            return False
+        if _git(source, "for-each-ref", "--format=%(refname)").stdout.strip():
+            return False
     _git(source, "worktree", "remove", "--", str(destination))
+    if prepared.isolated_history:
+        shutil.rmtree(source)
     return True
 
 
@@ -181,9 +229,11 @@ def verify_read_worktree(
 
     root = WorkspaceLayout.from_root(workspace).root
     _validate_names(repository, task, "read")
-    source = root / repository.path
     destination = _worktree_path(root, repository.name, task, "read")
+    source = _history_source(destination) if prepared.isolated_history else root / repository.path
     _validate_destination(root, destination)
+    if prepared.isolated_history:
+        _validate_destination(root, source)
     if prepared.path != str(destination) or prepared.repository != repository.name:
         return False
     if destination.is_symlink() or not destination.is_dir():
@@ -211,17 +261,33 @@ def _prepare_locked(
     task: str,
     mode: WorktreeMode,
     history_since: datetime | None,
+    *,
+    isolated_history: bool = False,
 ) -> PreparedWorktree:
-    _verify_source(source, repository)
+    if not isolated_history:
+        _verify_source(source, repository)
     reference = f"refs/lumon/prepared/{uuid4().hex}"
     try:
-        revision = _fetch_revision(source, repository, reference)
+        if isolated_history and history_since is not None:
+            try:
+                revision = _fetch_revision(source, repository, reference, since=history_since)
+            except PreflightError:
+                revision = _fetch_revision(source, repository, reference, depth=1)
+        else:
+            revision = _fetch_revision(source, repository, reference)
         history_covered = None
         history_issue = None
         if history_since is not None:
             revision, history_covered, history_issue = _cover_history(
-                source, repository, reference, revision, history_since
+                source,
+                repository,
+                reference,
+                revision,
+                history_since,
+                steps=_SCAN_BOUNDARY_DEEPEN_STEPS if isolated_history else _HISTORY_DEEPEN_STEPS,
             )
+        if isolated_history:
+            _dissociate_history(source, reference)
         shallow = _git(source, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
         fetched_at = datetime.now(UTC).isoformat()
         reused = destination.exists() or destination.is_symlink()
@@ -252,13 +318,20 @@ def _prepare_locked(
             shallow=shallow,
             history_covered=history_covered,
             history_issue=history_issue,
+            isolated_history=isolated_history,
         )
     finally:
         _git(source, "update-ref", "-d", reference, allowed=(0, 1, 128))
 
 
 def _fetch_revision(
-    source: Path, repository: RepositoryRecord, reference: str, *, deepen: int | None = None
+    source: Path,
+    repository: RepositoryRecord,
+    reference: str,
+    *,
+    deepen: int | None = None,
+    since: datetime | None = None,
+    depth: int | None = None,
 ) -> str:
     arguments = [
         "fetch",
@@ -269,12 +342,29 @@ def _fetch_revision(
     ]
     if deepen is not None:
         arguments.append(f"--deepen={deepen}")
+    if since is not None:
+        arguments.append(f"--shallow-since={since.isoformat()}")
+    if depth is not None:
+        arguments.append(f"--depth={depth}")
     arguments.extend(("origin", f"+refs/heads/{repository.branch}:{reference}"))
     _git(source, *_github_git_config(repository), *arguments)
     revision = _git(source, "rev-parse", "--verify", reference).stdout.strip()
     if not _REVISION.fullmatch(revision):
         raise PreflightError(f"Repository '{repository.name}' returned an invalid revision.")
     return revision
+
+
+def _dissociate_history(source: Path, reference: str) -> None:
+    # A shared clone must remain usable if the original checkout is pruned or removed.
+    refs = _git(source, "for-each-ref", "--format=%(refname)").stdout.splitlines()
+    for ref in refs:
+        if ref != reference:
+            _git(source, "update-ref", "-d", ref)
+    alternates = source / "objects" / "info" / "alternates"
+    if alternates.exists():
+        _git(source, "repack", "-a", "-d")
+        alternates.unlink(missing_ok=True)
+    _git(source, "fsck", "--connectivity-only", reference)
 
 
 def _github_git_config(repository: RepositoryRecord) -> tuple[str, ...]:
@@ -296,8 +386,10 @@ def _cover_history(
     reference: str,
     revision: str,
     since: datetime,
+    *,
+    steps: tuple[int, ...],
 ) -> tuple[str, bool, HistoryIssue | None]:
-    for deepen in _HISTORY_DEEPEN_STEPS:
+    for deepen in steps:
         if not _shallow_boundary_in_window(source, revision, since):
             return revision, True, None
         try:

@@ -534,9 +534,11 @@ Before the review, Lumon fetches each configured branch in parallel and prepares
 isolated read-only-intended worktrees at the fetched commits. The run records these
 baselines in `repository-baselines.json`. An unavailable Repository is excluded
 from review and reported; if all are unavailable, no review Agent is started.
-For shallow clones, Lumon deepens history in bounded increments when necessary for
-the scan window. If the window still reaches a shallow boundary, the result is
-incomplete rather than silently reporting full coverage.
+Lumon fetches the configured scan window into a separate Git history, then fetches
+the preceding baseline when needed. A branch without recent commits is still
+reviewed at its latest revision. If history cannot cover the window, the result is
+incomplete rather than silently reporting full coverage. The existing checkout and
+other worktrees keep their original Git history.
 Historical freshness claims for another commit are rejected. Clean scan worktrees
 are removed afterward; modified or unsafe ones are preserved and recorded.
 Ignored issues are identity references only: they do not require repair rechecks,
@@ -565,8 +567,10 @@ existing worktree preserves its files and reports whether it contains the latest
 fetched revision. The commit is current at fetch time; a remote can move again
 while the task is running. Existing local-change inspection remains available
 when explicitly requested. Normal chat and steering do not fetch all Repositories.
-For history questions, `--history-days <N>` requests bounded deepening and reports
-whether that window was covered; it does not automatically fetch submodules.
+For history questions, `--history-days <N>` prepares the requested window and
+reports whether it was covered. Read worktrees use a separate date-bounded Git
+history; work and delivery worktrees deepen their existing history as needed.
+This does not automatically fetch submodules.
 The Agent must invoke this command; no MCP server is required.
 
 ## Built-in automation workflows

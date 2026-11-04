@@ -96,6 +96,20 @@ def advance(source: Path, content: str) -> str:
     return git(source, "rev-parse", "HEAD")
 
 
+def age_initial_commit(source: Path, days: int) -> str:
+    date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    env = os.environ.copy()
+    env["GIT_COMMITTER_DATE"] = date
+    subprocess.run(
+        ["git", "-C", str(source), "commit", "--amend", "--no-edit", f"--date={date}"],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    git(source, "push", "-q", "--force", "origin", "main")
+    return git(source, "rev-parse", "HEAD")
+
+
 def test_fetches_latest_in_detached_worktree_and_preserves_checkout(
     repositories: tuple[Path, Path, Path, RepositoryRecord],
 ) -> None:
@@ -277,12 +291,149 @@ def test_scan_preparation_deepens_shallow_history_to_cover_its_window(
     assert git(Path(prepared.path), "rev-list", "--count", "HEAD") == "2"
 
 
+def test_scan_fetches_time_window_and_baseline_without_touching_existing_worktrees(
+    repositories: tuple[Path, Path, Path, RepositoryRecord], tmp_path: Path
+) -> None:
+    _workspace, source, remote, record = repositories
+    age_initial_commit(source, 30)
+    revisions: list[str] = []
+    for days in (10, 5, 2):
+        (source / "file.txt").write_text(f"{days} days ago\n", encoding="utf-8")
+        git(source, "add", "file.txt")
+        date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        env = os.environ.copy()
+        env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "-qm", f"{days} days ago"],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+        revisions.append(git(source, "rev-parse", "HEAD"))
+    git(source, "push", "-q", "origin", "main")
+
+    workspace = tmp_path / "scan-workspace"
+    checkout = workspace / record.path
+    checkout.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", "--depth=1", remote.as_uri(), str(checkout)], check=True)
+    other = tmp_path / "other-worktree"
+    git(checkout, "worktree", "add", "--detach", str(other), "HEAD")
+    (other / "file.txt").write_text("keep my work\n", encoding="utf-8")
+    shallow_before = (checkout / ".git" / "shallow").read_text()
+    lock = checkout / ".git" / "shallow.lock"
+    lock.write_text("keep this lock", encoding="utf-8")
+
+    prepared = prepare_worktree(
+        workspace, record, "dated", mode="read", history_since=datetime.now(UTC) - timedelta(days=7)
+    )
+
+    snapshot = Path(prepared.path)
+    assert prepared.history_covered is True
+    assert git(snapshot, "rev-list", "HEAD").splitlines() == list(reversed(revisions))
+    assert git(snapshot, "show", f"{revisions[0]}:file.txt") == "10 days ago"
+    assert (checkout / ".git" / "shallow").read_text() == shallow_before
+    assert lock.read_text() == "keep this lock"
+    assert (other / "file.txt").read_text() == "keep my work\n"
+    assert remove_read_worktree(workspace, record, "dated", prepared)
+    assert not snapshot.exists()
+    assert not (snapshot.parent / ".app-history.git").exists()
+
+
+def test_scan_with_no_commits_in_window_is_not_a_failure(
+    repositories: tuple[Path, Path, Path, RepositoryRecord], tmp_path: Path
+) -> None:
+    _workspace, source, remote, record = repositories
+    latest = age_initial_commit(source, 30)
+    workspace = tmp_path / "old-workspace"
+    checkout = workspace / record.path
+    checkout.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", "--depth=1", remote.as_uri(), str(checkout)], check=True)
+
+    prepared = prepare_worktree(
+        workspace,
+        record,
+        "no-changes",
+        mode="read",
+        history_since=datetime.now(UTC) - timedelta(days=7),
+    )
+
+    assert prepared.remote_revision == latest
+    assert prepared.history_covered is True and prepared.history_issue is None
+    assert git(Path(prepared.path), "rev-list", "--count", "HEAD") == "1"
+    assert remove_read_worktree(workspace, record, "no-changes", prepared)
+
+
+def test_scan_history_does_not_shorten_a_shared_merge_history(
+    repositories: tuple[Path, Path, Path, RepositoryRecord], tmp_path: Path
+) -> None:
+    _workspace, source, remote, record = repositories
+    age_initial_commit(source, 30)
+    git(source, "checkout", "-qb", "feature")
+    (source / "feature.txt").write_text("feature\n", encoding="utf-8")
+    git(source, "add", "feature.txt")
+    date = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    env = os.environ.copy()
+    env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+    subprocess.run(
+        ["git", "-C", str(source), "commit", "-qm", "older feature"],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    git(source, "checkout", "-q", "main")
+    (source / "main.txt").write_text("recent\n", encoding="utf-8")
+    git(source, "add", "main.txt")
+    git(source, "commit", "-qm", "recent change")
+    git(source, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    git(source, "push", "-q", "origin", "main")
+
+    workspace = tmp_path / "merge-workspace"
+    checkout = workspace / record.path
+    checkout.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", "--depth=2", remote.as_uri(), str(checkout)], check=True)
+    original_history = git(checkout, "rev-list", "main")
+    original_shallow = (checkout / ".git" / "shallow").read_text()
+
+    prepared = prepare_worktree(
+        workspace,
+        record,
+        "merge-window",
+        mode="read",
+        history_since=datetime.now(UTC) - timedelta(days=7),
+    )
+
+    assert prepared.history_covered is True
+    assert git(Path(prepared.path), "rev-list", "--count", "HEAD") == "4"
+    assert git(checkout, "rev-list", "main") == original_history
+    assert (checkout / ".git" / "shallow").read_text() == original_shallow
+    assert remove_read_worktree(workspace, record, "merge-window", prepared)
+
+
+def test_scan_history_fetch_does_not_treat_unavailable_remote_as_no_changes(
+    repositories: tuple[Path, Path, Path, RepositoryRecord],
+) -> None:
+    workspace, _source, remote, record = repositories
+    remote.rename(remote.with_name("unavailable.git"))
+
+    with pytest.raises(PreflightError, match="fetch"):
+        prepare_worktree(
+            workspace,
+            record,
+            "unavailable",
+            mode="read",
+            history_since=datetime.now(UTC) - timedelta(days=7),
+        )
+
+    assert not (workspace / "lumon" / "worktrees" / "_reads" / "unavailable" / "app").exists()
+
+
 def test_shallow_history_is_reported_when_the_deepen_budget_is_not_enough(
     repositories: tuple[Path, Path, Path, RepositoryRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _workspace, source, remote, record = repositories
+    age_initial_commit(source, 30)
     advance(source, "second commit\n")
     advance(source, "third commit\n")
     workspace = tmp_path / "shallow-workspace"
@@ -291,7 +442,7 @@ def test_shallow_history_is_reported_when_the_deepen_budget_is_not_enough(
         ["git", "clone", "-q", "--depth=1", remote.as_uri(), str(workspace / "repos" / "app")],
         check=True,
     )
-    monkeypatch.setattr("lumon.workspace.repository_worktree._HISTORY_DEEPEN_STEPS", (1,))
+    monkeypatch.setattr("lumon.workspace.repository_worktree._SCAN_BOUNDARY_DEEPEN_STEPS", ())
 
     prepared = prepare_worktree(
         workspace,
@@ -347,6 +498,7 @@ def test_failed_deepening_keeps_the_fresh_commit_and_marks_history_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _workspace, source, remote, record = repositories
+    age_initial_commit(source, 30)
     latest = advance(source, "latest\n")
     workspace = tmp_path / "shallow-workspace"
     (workspace / "repos").mkdir(parents=True)
