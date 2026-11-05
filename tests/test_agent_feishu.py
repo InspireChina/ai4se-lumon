@@ -17,6 +17,7 @@ from lumon.agents.agent.feishu import (
     normalize_recalled_message,
 )
 from lumon.agents.agent.model import InboundImage, InboundMessage, RecalledMessage
+from lumon.errors import AgentRuntimeError
 
 
 def _raw(
@@ -152,6 +153,8 @@ class _FakeSdkChannel:
         self.handlers: dict[str, Any] = {}
         self.raw_handlers: dict[str, Any] = {}
         self.sent: list[tuple[str, object, object]] = []
+        self.reactions: list[tuple[str, str]] = []
+        self.reaction_success = True
         self.quoted_messages: dict[str, object] = {}
         self.downloaded_message_ids: list[str] = []
         self.downloaded_file_names: list[str | None] = []
@@ -173,6 +176,10 @@ class _FakeSdkChannel:
         self.sent.append((chat_id, body, options))
         return SimpleNamespace(success=True)
 
+    async def add_reaction(self, message_id: str, emoji_type: str) -> SimpleNamespace:
+        self.reactions.append((message_id, emoji_type))
+        return SimpleNamespace(success=self.reaction_success)
+
     async def fetch_inbound_message(self, message_id: str) -> object | None:
         return self.quoted_messages.get(message_id)
 
@@ -192,6 +199,27 @@ class _FakeSdkChannel:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"image")
         return path
+
+
+def test_got_it_reacts_to_the_original_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = AgentFeishuChannel(AgentConfig())
+    sdk_channel = _FakeSdkChannel()
+    monkeypatch.setattr(channel, "_channel", sdk_channel)
+
+    asyncio.run(channel.add_got_it("om-followup"))
+
+    assert sdk_channel.reactions == [("om-followup", "Get")]
+    assert sdk_channel.sent == []
+
+
+def test_got_it_reaction_reports_sdk_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = AgentFeishuChannel(AgentConfig())
+    sdk_channel = _FakeSdkChannel()
+    sdk_channel.reaction_success = False
+    monkeypatch.setattr(channel, "_channel", sdk_channel)
+
+    with pytest.raises(AgentRuntimeError, match="acknowledgment reaction failed"):
+        asyncio.run(channel.add_got_it("om-followup"))
 
 
 def test_channel_explicitly_configures_message_policy(

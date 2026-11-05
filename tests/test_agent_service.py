@@ -180,6 +180,9 @@ class FakeChannel(AgentFeishuChannel):
         self.replies: list[str] = []
         self.typing_added: list[str] = []
         self.typing_removed: list[tuple[str, str]] = []
+        self.got_it_attempts: list[str] = []
+        self.got_it_attempted = asyncio.Event()
+        self.got_it_error: Exception | None = None
         self.fail_replies = False
 
     async def connect(
@@ -201,6 +204,12 @@ class FakeChannel(AgentFeishuChannel):
     async def add_typing(self, message_id: str) -> str:
         self.typing_added.append(message_id)
         return f"reaction:{message_id}"
+
+    async def add_got_it(self, message_id: str) -> None:
+        self.got_it_attempts.append(message_id)
+        self.got_it_attempted.set()
+        if self.got_it_error is not None:
+            raise self.got_it_error
 
     async def remove_typing(self, message_id: str, reaction_id: str) -> None:
         self.typing_removed.append((message_id, reaction_id))
@@ -1213,13 +1222,14 @@ def test_model_reload_preserves_injected_runner(reload_runtime: ReloadRuntime) -
 
 
 class SteeringRunner(FakeRunner):
-    def __init__(self) -> None:
+    def __init__(self, *, accept_steering: bool = True) -> None:
         super().__init__()
         self.started = asyncio.Event()
         self.received = asyncio.Event()
         self.release = asyncio.Event()
         self.steered: list[str] = []
         self.policies: list[str | None] = []
+        self.accept_steering = accept_steering
 
     async def run(
         self,
@@ -1240,7 +1250,7 @@ class SteeringRunner(FakeRunner):
             self.started.set()
             request = await control.receive()
             self.steered.append(request.input.text)
-            request.accepted.set_result(True)
+            request.accepted.set_result(self.accept_steering)
             self.received.set()
             await self.release.wait()
         return AgentResult(
@@ -1248,7 +1258,7 @@ class SteeringRunner(FakeRunner):
         )
 
 
-@pytest.mark.parametrize("followup", ["please add tests", "先不要 commit／push"])
+@pytest.mark.parametrize("followup", ["please add tests", "先不要 commit／push", "/resume"])
 def test_followup_steers_running_turn_once_and_persists_hold(
     reload_runtime: ReloadRuntime,
     followup: str,
@@ -1265,12 +1275,15 @@ def test_followup_steers_running_turn_once_and_persists_hold(
             await runtime.service.handle_message(message)
             await runtime.service.handle_message(message)
             await asyncio.wait_for(runner.received.wait(), 3)
+            await asyncio.wait_for(runtime.channel.got_it_attempted.wait(), 3)
             for _ in range(20):
                 if runtime.service.session_store.event_status("followup") == "merged":
                     break
                 await asyncio.sleep(0.01)
             assert runtime.service.session_store.event_status("followup") == "merged"
             assert len(runner.prompts) == 1
+            assert runtime.channel.got_it_attempts == [message.message_id]
+            assert runtime.channel.replies == []
             runner.release.set()
             await runtime.service.wait_for_idle()
         finally:
@@ -1285,6 +1298,58 @@ def test_followup_steers_running_turn_once_and_persists_hold(
     assert reopened.writes_paused(session.session_id) == ("commit" in followup)
     history = reopened.load_history(session.session_id)
     assert sum(item.text == followup for item in history) == 1
+    assert runtime.channel.replies == ["Updated outcome"]
+
+
+@pytest.mark.parametrize("reaction_error", [AgentRuntimeError("test failure"), TimeoutError()])
+def test_failed_reaction_does_not_undo_accepted_steering(
+    reload_runtime: ReloadRuntime, reaction_error: Exception
+) -> None:
+    runtime = reload_runtime
+    runner = SteeringRunner()
+    runtime.service.agent_runner = runner
+    runtime.channel.got_it_error = reaction_error
+
+    async def run() -> None:
+        try:
+            await runtime.service.handle_message(reload_message("first"))
+            await asyncio.wait_for(runner.started.wait(), 3)
+            await runtime.service.handle_message(reload_message("followup"))
+            await asyncio.wait_for(runtime.channel.got_it_attempted.wait(), 3)
+            runner.release.set()
+            await runtime.service.wait_for_idle()
+        finally:
+            runner.release.set()
+            await runtime.service.stop()
+
+    asyncio.run(run())
+    assert runtime.service.session_store.event_status("followup") == "merged"
+    assert runtime.channel.got_it_attempts == ["om-followup"]
+    assert len(runner.prompts) == 1
+    assert runtime.channel.replies == ["Updated outcome"]
+
+
+def test_rejected_steering_is_queued_without_a_reaction(reload_runtime: ReloadRuntime) -> None:
+    runtime = reload_runtime
+    runner = SteeringRunner(accept_steering=False)
+    runtime.service.agent_runner = runner
+
+    async def run() -> None:
+        try:
+            await runtime.service.handle_message(reload_message("first"))
+            await asyncio.wait_for(runner.started.wait(), 3)
+            await runtime.service.handle_message(reload_message("followup"))
+            await asyncio.wait_for(runner.received.wait(), 3)
+            runner.release.set()
+            await runtime.service.wait_for_idle()
+        finally:
+            runner.release.set()
+            await runtime.service.stop()
+
+    asyncio.run(run())
+    assert len(runner.prompts) == 2
+    assert runtime.channel.got_it_attempts == []
+    assert runtime.channel.replies == ["Updated outcome", "Updated outcome"]
 
 
 @pytest.mark.parametrize("group_thread", [False, True])

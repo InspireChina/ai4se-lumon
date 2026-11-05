@@ -112,6 +112,18 @@ class AgentFeishuChannel:
             raise AgentRuntimeError("Feishu typing reaction could not be added.") from exc
         return reaction_id if isinstance(reaction_id, str) and reaction_id else None
 
+    async def add_got_it(self, message_id: str) -> None:
+        """Acknowledge an accepted steering message with Feishu's Get reaction."""
+
+        if self._channel is None:
+            raise AgentRuntimeError("Feishu channel is not connected.")
+        try:
+            result: object = await self._channel.add_reaction(message_id, "Get")
+        except Exception as exc:
+            raise AgentRuntimeError("Feishu acknowledgment reaction failed.") from exc
+        if getattr(result, "success", False) is not True:
+            raise AgentRuntimeError("Feishu acknowledgment reaction failed.")
+
     async def remove_typing(self, message_id: str, reaction_id: str) -> None:
         """Remove a Typing reaction previously created by :meth:`add_typing`."""
 

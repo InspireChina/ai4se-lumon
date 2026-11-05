@@ -751,16 +751,11 @@ class AgentService:
             self.session_store.mark_event_status(message.event_id, "merged")
             if policy == "resume":
                 self.session_store.confirm_write_resume(active.session_id, message.event_id)
-            if policy == "pause":
-                text = (
-                    "已中斷舊輪次並以唯讀方式接續。已完成的操作無法撤回；"
-                    "輸入 /resume 才恢復操作能力。"
-                )
-            elif policy == "resume":
-                text = "已按你的指示恢復原有操作能力，並接續目前會話。"
-            else:
-                text = "補充訊息已送入目前處理中的任務，不需等待下一輪。"
-            await self._send(message, text)
+            if self._channel is not None:
+                try:
+                    await asyncio.wait_for(self._channel.add_got_it(message.message_id), timeout=5)
+                except (AgentRuntimeError, TimeoutError):
+                    logger.warning("Unable to acknowledge steering with a Feishu reaction.")
         except (LumonError, OSError):
             self.session_store.mark_event_status(message.event_id, "failed")
             await self._send(message, "追加訊息未能送入任務，請重試；若要停止操作，請輸入 /pause。")
