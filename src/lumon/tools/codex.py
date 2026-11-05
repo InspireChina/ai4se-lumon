@@ -16,6 +16,7 @@ from os import X_OK, access
 from pathlib import Path
 from typing import Literal, cast
 
+from lumon.errors import LumonError
 from lumon.tools.safety import sanitize_command, sanitize_output
 
 CodexEventKind = Literal[
@@ -147,6 +148,7 @@ class CodexTool:
         resume_session_id: str | None = None,
         *,
         images: tuple[Path, ...] = (),
+        skill_config: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         """Return the exact argument vector used for one execution."""
 
@@ -161,7 +163,7 @@ class CodexTool:
         ]
         from lumon.tools.github_mcp_proxy import workspace_mcp_config
 
-        for setting in workspace_mcp_config(workspace):
+        for setting in (*workspace_mcp_config(workspace), *skill_config):
             command.extend(("--config", setting))
         if self.model:
             command.extend(("--model", self.model))
@@ -193,6 +195,12 @@ class CodexTool:
                 self._execute_process(request, on_event),
                 timeout=self.timeout_seconds,
             )
+        except LumonError:
+            return CodexExecutionResult(
+                status="failed",
+                error_code=CodexErrorCode.EXECUTION_FAILED,
+                failure_diagnostic="Unable to apply Workspace Skill settings.",
+            )
         except TimeoutError:
             return CodexExecutionResult(
                 status="timed_out",
@@ -221,13 +229,18 @@ class CodexTool:
         stderr_task: asyncio.Task[bytes] | None = None
         agent_session_id: str | None = None
         try:
+            from lumon.skills.manager import workspace_skill_config
             from lumon.tools.github_mcp_proxy import workspace_git_environment
 
+            skill_config = await workspace_skill_config(
+                request.workspace, self.binary, self.environment
+            )
             process = await asyncio.create_subprocess_exec(
                 *self.build_command(
                     request.workspace,
                     request.resume_session_id,
                     images=request.images,
+                    skill_config=skill_config,
                 ),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,

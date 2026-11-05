@@ -1,6 +1,21 @@
 export type WorkspaceHealth = "ready" | "missing" | "invalid";
 
-export type View = "overview" | "settings" | "repositories" | "agent" | "auto-delivery" | "auto-scan" | "flows" | "capabilities";
+export type View = "overview" | "settings" | "repositories" | "agent" | "auto-delivery" | "auto-scan" | "flows" | "capabilities" | "skills";
+
+export interface WorkspaceSkill {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  source: string;
+  enabled: boolean;
+  codex_enabled: boolean;
+}
+
+export interface SkillInventory {
+  skills: WorkspaceSkill[];
+  error_count: number;
+}
 
 export type ChatKind = "all" | "group" | "direct";
 

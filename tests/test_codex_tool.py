@@ -18,6 +18,50 @@ def test_codex_tool_defaults_to_twelve_hour_timeout() -> None:
     assert CodexTool(binary="codex").timeout_seconds == 12 * 60 * 60
 
 
+@pytest.mark.parametrize("session", [None, "previous-session"])
+def test_exec_applies_workspace_skill_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str | None
+) -> None:
+    from lumon.skills import manager
+
+    async def config(*_args: object) -> tuple[str, ...]:
+        return ('skills.config=[{path="/skill/SKILL.md",enabled=false}]',)
+
+    monkeypatch.setattr(manager, "workspace_skill_config", config)
+    args_file = tmp_path / "args"
+    fake = tmp_path / "codex"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"open({str(args_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type':'turn.completed'}))\n"
+    )
+    fake.chmod(0o700)
+    result = asyncio.run(
+        CodexTool(binary=str(fake)).execute(CodexRequest(tmp_path, "test", session))
+    )
+    assert result.status == "succeeded"
+    args = json.loads(args_file.read_text())
+    assert 'skills.config=[{path="/skill/SKILL.md",enabled=false}]' in args
+    assert ("resume" in args) is (session is not None)
+
+
+def test_exec_does_not_start_if_skill_settings_cannot_be_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lumon.errors import AgentRuntimeError
+    from lumon.skills import manager
+
+    async def failing_config(*_args: object) -> tuple[str, ...]:
+        raise AgentRuntimeError("private provider data")
+
+    monkeypatch.setattr(manager, "workspace_skill_config", failing_config)
+    result = asyncio.run(CodexTool(binary="missing-codex").execute(CodexRequest(tmp_path, "test")))
+    assert result.status == "failed"
+    assert result.failure_diagnostic == "Unable to apply Workspace Skill settings."
+
+
 @pytest.mark.parametrize("detached", [False, True])
 def test_cancellation_stops_codex_and_its_child_commands(tmp_path: Path, detached: bool) -> None:
     fake = tmp_path / "codex-child"

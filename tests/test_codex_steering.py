@@ -110,6 +110,67 @@ def requests(tmp_path: Path) -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.parametrize("session", [None, "previous-session"])
+def test_steerable_execution_applies_workspace_skill_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str | None
+) -> None:
+    from collections.abc import Mapping, Sequence
+
+    from lumon.tools import codex_app_server
+    from lumon.tools.codex_rpc import CodexRpc
+
+    async def skill_config(*_args: object) -> tuple[str, ...]:
+        return ('skills.config=[{path="/skill/SKILL.md",enabled=false}]',)
+
+    original_start = CodexRpc.start
+    started_with: list[tuple[str, ...]] = []
+
+    async def capture_start(
+        self: CodexRpc,
+        binary: str,
+        workspace: Path,
+        environment: Mapping[str, str] | None,
+        *,
+        config: Sequence[str] = (),
+    ) -> None:
+        started_with.append(tuple(config))
+        await original_start(self, binary, workspace, environment, config=config)
+
+    monkeypatch.setattr(codex_app_server, "workspace_skill_config", skill_config)
+    monkeypatch.setattr(CodexRpc, "start", capture_start)
+    result = asyncio.run(
+        execute_steerable(
+            fake_tool(tmp_path, "immediate"),
+            CodexRequest(tmp_path, "test", session),
+            SteeringControl(),
+        )
+    )
+    assert result.status == "succeeded"
+    assert started_with == [('skills.config=[{path="/skill/SKILL.md",enabled=false}]',)]
+    calls = requests(tmp_path)
+    assert any(call["method"] == ("thread/resume" if session else "thread/start") for call in calls)
+
+
+def test_steerable_execution_does_not_start_if_skill_settings_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lumon.errors import AgentRuntimeError
+    from lumon.tools import codex_app_server
+
+    async def failing_config(*_args: object) -> tuple[str, ...]:
+        raise AgentRuntimeError("private provider data")
+
+    monkeypatch.setattr(codex_app_server, "workspace_skill_config", failing_config)
+    result = asyncio.run(
+        execute_steerable(
+            fake_tool(tmp_path, "immediate"), CodexRequest(tmp_path, "test"), SteeringControl()
+        )
+    )
+    assert result.status == "failed"
+    assert result.failure_diagnostic == "Unable to apply Workspace Skill settings."
+    assert not (tmp_path / "requests").exists()
+
+
 def test_native_steering_updates_same_turn_and_accepts_images(tmp_path: Path) -> None:
     tool = fake_tool(tmp_path)
 

@@ -93,7 +93,8 @@ it("merges history into Agent, moves global configuration to Settings and protec
     expect(container.querySelectorAll("h1")).toHaveLength(1);
     expect(container.querySelector("h1")?.textContent).toBe("Agent");
     expect(container.querySelector("#agent-model")).toBeNull();
-    expect(container.querySelectorAll(".side-nav button")).toHaveLength(8);
+    expect(container.querySelectorAll(".side-nav button")).toHaveLength(9);
+    expect(navigation("Skills")).not.toBeNull();
     expect(container.querySelector(".side-nav")?.textContent).not.toContain("Conversation history");
 
     await act(async () => navigation("Settings").click());

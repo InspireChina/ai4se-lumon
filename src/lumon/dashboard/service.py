@@ -54,6 +54,8 @@ from lumon.flows.service import FlowService
 from lumon.scan.model import ScanRun, ScanState
 from lumon.scan.scheduler import LaunchdScanScheduler, ScanScheduler
 from lumon.scan.service import ScanService
+from lumon.skills.manager import CodexSkillManager, SkillInventory
+from lumon.skills.settings import WorkspaceSkillSettings
 from lumon.tools.codex_mcp import CodexMcpManager, McpDiscovery, McpInventory, McpNewServer
 from lumon.tools.codex_models import CodexModel, CodexModelCatalog
 from lumon.tools.codex_status import CodexCliStatus, CodexCliUpdateChecker
@@ -353,6 +355,7 @@ class DashboardService:
         model_loader: Callable[[], Awaitable[tuple[CodexModel, ...]]] | None = None,
         codex_update_checker: CodexCliUpdateChecker | None = None,
         mcp_manager: CodexMcpManager | None = None,
+        skill_manager: CodexSkillManager | None = None,
         flow_service: FlowService | None = None,
         setup_inspector: SetupInspector | None = None,
     ) -> None:
@@ -366,6 +369,9 @@ class DashboardService:
         self._model_loader = model_loader or CodexModelCatalog().list_models
         self._codex_update_checker = codex_update_checker or CodexCliUpdateChecker()
         self._mcp_manager = mcp_manager or CodexMcpManager()
+        self._skill_manager = skill_manager or CodexSkillManager(
+            settings=WorkspaceSkillSettings(self.registry.layout.root)
+        )
         self.initializer = initializer or WorkspaceInitializer(
             registry=self.registry,
             settings_store=self.settings_store,
@@ -1052,6 +1058,14 @@ class DashboardService:
 
     async def mcp_servers(self, workspace_id: UUID) -> McpInventory:
         return await self._mcp_manager.list_servers(self._require(workspace_id).path)
+
+    async def skills(self, workspace_id: UUID) -> SkillInventory:
+        return await self._skill_manager.inventory(self._require(workspace_id).path, workspace_id)
+
+    async def set_skill_enabled(self, workspace_id: UUID, skill_id: str, enabled: bool) -> None:
+        await self._skill_manager.set_enabled(
+            self._require(workspace_id).path, workspace_id, skill_id, enabled
+        )
 
     async def discover_mcp(self, workspace_id: UUID, name: str) -> McpDiscovery:
         return await self._mcp_manager.discover(self._require(workspace_id).path, name)

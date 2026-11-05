@@ -158,6 +158,7 @@ class WorkspaceSettingsStore:
         path = self.path_for(workspace_id)
         try:
             path.unlink(missing_ok=True)
+            path.with_name("skills.json").unlink(missing_ok=True)
             if path.parent.is_dir() and not any(path.parent.iterdir()):
                 path.parent.rmdir()
             if self.layout.profiles.is_dir() and not any(self.layout.profiles.iterdir()):

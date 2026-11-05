@@ -24,6 +24,7 @@ from lumon.errors import AgentRuntimeError, PreflightError
 from lumon.scan.model import IssueReviewStatus, ScanFinding, ScanIssueReview, ScanRun, ScanState
 from lumon.scan.store import ScanRunStore
 from lumon.skills.installer import SkillInstaller
+from lumon.skills.manager import CodexSkillManager, SkillInventory, WorkspaceSkill
 from lumon.tools.codex_mcp import (
     CodexMcpManager,
     McpDiscovery,
@@ -176,6 +177,7 @@ def _service(
     model_loader: Callable[[], Awaitable[tuple[CodexModel, ...]]] | None = None,
     codex_update_checker: CodexCliUpdateChecker | None = None,
     mcp_manager: CodexMcpManager | None = None,
+    skill_manager: CodexSkillManager | None = None,
 ) -> DashboardService:
     state_root = tmp_path / "user-state"
     registry = WorkspaceRegistry(state_root)
@@ -197,6 +199,7 @@ def _service(
         model_loader=model_loader,
         codex_update_checker=codex_update_checker,
         mcp_manager=mcp_manager,
+        skill_manager=skill_manager,
     )
 
 
@@ -206,6 +209,50 @@ def _client(service: DashboardService) -> httpx.Client:
 
 def _static_client(service: DashboardService, static_dir: Path) -> httpx.Client:
     return TestClient(create_dashboard_app(service, static_dir=static_dir))
+
+
+def test_skill_api_uses_workspace_scope_and_rejects_foreign_origin(tmp_path: Path) -> None:
+    class FakeManager(CodexSkillManager):
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def inventory(self, workspace: Path, workspace_id: UUID) -> SkillInventory:
+            self.calls.append(("list", workspace, workspace_id))
+            return SkillInventory(
+                (
+                    WorkspaceSkill(
+                        "id", "jira", "Jira help", "/user/jira/SKILL.md", "user", True, True
+                    ),
+                ),
+                0,
+            )
+
+        async def set_enabled(
+            self, workspace: Path, workspace_id: UUID, skill_id: str, enabled: bool
+        ) -> None:
+            self.calls.append(("set", workspace, workspace_id, skill_id, enabled))
+
+    manager = FakeManager()
+    service = _service(tmp_path, skill_manager=manager)
+    client = _client(service)
+    client.base_url = httpx.URL("http://127.0.0.1:15778")
+    workspace = tmp_path / "workspace"
+    workspace_id = client.post(
+        "/api/workspaces/initialize", json={"path": str(workspace), "repositories": []}
+    ).json()["workspace_id"]
+    url = f"/api/workspaces/{workspace_id}/skills"
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.json()["skills"][0]["name"] == "jira"
+    assert response.headers["cache-control"] == "no-store"
+    assert client.put(f"{url}/id", json={"enabled": False}).status_code == 204
+    assert manager.calls[-1] == ("set", workspace, UUID(workspace_id), "id", False)
+    assert (
+        client.put(
+            f"{url}/id", json={"enabled": True}, headers={"Origin": "https://evil.example"}
+        ).status_code
+        == 403
+    )
 
 
 def test_mcp_api_is_scoped_and_rejects_foreign_origins(tmp_path: Path) -> None:

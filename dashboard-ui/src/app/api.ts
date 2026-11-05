@@ -20,6 +20,7 @@ import type {
   McpDiscovery,
   McpInventory,
   SettingsUpdate,
+  SkillInventory,
   SetupReport,
   WebhookTestResponse,
   WorkspaceFolderSelection,
@@ -113,6 +114,14 @@ export const dashboardApi = {
   },
   listMcp(workspaceId: string): Promise<McpInventory> {
     return request(`/api/workspaces/${workspaceId}/mcp`, { cache: "no-store" });
+  },
+  listSkills(workspaceId: string): Promise<SkillInventory> {
+    return request(`/api/workspaces/${workspaceId}/skills`, { cache: "no-store" });
+  },
+  setSkillEnabled(workspaceId: string, id: string, enabled: boolean): Promise<void> {
+    return request(`/api/workspaces/${workspaceId}/skills/${encodeURIComponent(id)}`, {
+      method: "PUT", body: JSON.stringify({ enabled }),
+    });
   },
   addMcp(workspaceId: string, payload: McpCreate): Promise<void> {
     return request(`/api/workspaces/${workspaceId}/mcp`, { method: "POST", body: JSON.stringify(payload) });

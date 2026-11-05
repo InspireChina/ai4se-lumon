@@ -72,6 +72,9 @@ from lumon.dashboard.schemas import (
     ScanFindingResponse,
     ScanRunResponse,
     SetupResponse,
+    SkillInventoryResponse,
+    SkillResponse,
+    SkillUpdateRequest,
     WebhookTestResponse,
     WorkflowScheduleResponse,
     WorkspaceFolderSelectionResponse,
@@ -267,6 +270,29 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
             ],
             user_version=inventory.user_version,
         )
+
+    @router.get("/workspaces/{workspace_id}/skills", response_model=SkillInventoryResponse)
+    async def skill_inventory(
+        request: Request, response: Response, workspace_id: UUID
+    ) -> SkillInventoryResponse:
+        _require_local_origin(request)
+        response.headers["Cache-Control"] = "no-store"
+        inventory = await _service(request).skills(workspace_id)
+        return SkillInventoryResponse(
+            skills=[
+                SkillResponse.model_validate(skill, from_attributes=True)
+                for skill in inventory.skills
+            ],
+            error_count=inventory.error_count,
+        )
+
+    @router.put("/workspaces/{workspace_id}/skills/{skill_id}", status_code=204)
+    async def update_skill(
+        request: Request, workspace_id: UUID, skill_id: str, payload: SkillUpdateRequest
+    ) -> Response:
+        _require_local_origin(request)
+        await _service(request).set_skill_enabled(workspace_id, skill_id, payload.enabled)
+        return Response(status_code=204)
 
     @router.post("/workspaces/{workspace_id}/mcp", status_code=204)
     async def add_mcp(request: Request, workspace_id: UUID, payload: McpCreateRequest) -> Response:

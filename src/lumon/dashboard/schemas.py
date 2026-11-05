@@ -142,6 +142,25 @@ class McpRemoveRequest(StrictModel):
     expected_version: str | None = Field(default=None, max_length=256)
 
 
+class SkillResponse(StrictModel):
+    id: str
+    name: str
+    description: str
+    path: str
+    source: str
+    enabled: bool
+    codex_enabled: bool
+
+
+class SkillInventoryResponse(StrictModel):
+    skills: list[SkillResponse]
+    error_count: int
+
+
+class SkillUpdateRequest(StrictModel):
+    enabled: bool
+
+
 class AgentObservabilityUpdate(StrictModel):
     """Langfuse settings with optional credential replacements."""
 

@@ -7,6 +7,8 @@ import json
 from collections import deque
 from typing import cast
 
+from lumon.errors import LumonError
+from lumon.skills.manager import workspace_skill_config
 from lumon.tools.codex import (
     CodexErrorCode,
     CodexEvent,
@@ -37,6 +39,15 @@ async def execute_steerable(
         return session.failure(CodexErrorCode.CLI_NOT_FOUND)
     except (OSError, ValueError, CodexRpcError):
         return session.failure(CodexErrorCode.EXECUTION_FAILED)
+    except LumonError:
+        result = session.failure(CodexErrorCode.EXECUTION_FAILED)
+        return CodexExecutionResult(
+            status=result.status,
+            error_code=result.error_code,
+            agent_session_id=result.agent_session_id,
+            events=result.events,
+            failure_diagnostic="Unable to apply Workspace Skill settings.",
+        )
     finally:
         control.close()
         await session.close()
@@ -68,7 +79,10 @@ class _Execution:
         self.callback_failed = False
 
     async def run(self) -> CodexExecutionResult:
-        config = workspace_mcp_config(self.request.workspace)
+        skill_config = await workspace_skill_config(
+            self.request.workspace, self.tool.binary, self.tool.environment
+        )
+        config = (*workspace_mcp_config(self.request.workspace), *skill_config)
         environment = workspace_git_environment(self.request.workspace, self.tool.environment)
         if config:
             await self.rpc.start(

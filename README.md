@@ -106,6 +106,11 @@ the command is safe and does not initialize Git or create a commit. Skills are
 global Agent instructions; `AGENTS.md` contains rules specific to this
 Workspace.
 
+In the Dashboard, **Skills** lists the skills Codex discovers for the selected
+Workspace. Switches apply to future Agent and automation runs in that Workspace;
+they do not change Codex's shared settings. Skills disabled in Codex remain
+disabled. A resumed conversation may still contain earlier skill instructions.
+
 Initialization creates Workspace metadata; it does not start Agent or automation.
 The Dashboard completion screen shows missing dependencies and Agent settings.
 `lumon doctor` checks CLI dependencies and logins; `lumon agent doctor` also

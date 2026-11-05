@@ -7,6 +7,7 @@ import {
   FolderGit2,
   GitBranch,
   LayoutDashboard,
+  Library,
   LoaderCircle,
   Puzzle,
   Rocket,
@@ -22,6 +23,7 @@ import { ChatHistoryPage } from "../features/agent/ChatHistoryPage";
 import { AutoDeliveryPage } from "../features/delivery/AutoDeliveryPage";
 import { AutoScanPage } from "../features/scan/AutoScanPage";
 import { CapabilitiesPage } from "../features/capabilities/CapabilitiesPage";
+import { SkillsPage } from "../features/skills/SkillsPage";
 import { FlowsPage } from "../features/flows/FlowsPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { AutoDeliverySettingsPanel } from "../features/settings/AutoDeliverySettingsPanel";
@@ -79,6 +81,7 @@ export function App(): React.JSX.Element {
     "auto-scan": t("app.autoScan"),
     flows: t("app.flows"),
     capabilities: t("app.capabilities"),
+    skills: t("app.skills"),
   };
 
   const refreshWorkspaces = useCallback(async (): Promise<WorkspaceListItem[]> => {
@@ -301,6 +304,7 @@ export function App(): React.JSX.Element {
           <p className="nav-group-label">{t("app.libraryGroup")}</p>
           <button className={view === "flows" ? "active" : ""} title={viewLabels.flows} aria-label={viewLabels.flows} aria-current={view === "flows" ? "page" : undefined} type="button" onClick={() => changeView("flows")}><GitBranch size={17} /><span>{viewLabels.flows}</span></button>
           <button className={view === "capabilities" ? "active" : ""} title={viewLabels.capabilities} aria-label={viewLabels.capabilities} aria-current={view === "capabilities" ? "page" : undefined} type="button" onClick={() => changeView("capabilities")}><Puzzle size={17} /><span>{viewLabels.capabilities}</span></button>
+          <button className={view === "skills" ? "active" : ""} title={viewLabels.skills} aria-label={viewLabels.skills} aria-current={view === "skills" ? "page" : undefined} type="button" onClick={() => changeView("skills")}><Library size={17} /><span>{viewLabels.skills}</span></button>
         </nav>
         <div className="sidebar-footer">
           <img className="company-logo" src="/inspire-group-logo-white.png" alt={t("app.companyLogoAlt")} />
@@ -341,6 +345,7 @@ export function App(): React.JSX.Element {
           {selectedId && view === "auto-scan" && <AutoScanPage key={selectedId} workspaceId={selectedId} onError={setError} />}
           {selectedId && view === "flows" && <FlowsPage workspaceId={selectedId} initialDocumentId={workflowId} onDirtyChange={setFlowsDirty} onNotice={setNotice} onError={setError} />}
           {selectedId && view === "capabilities" && <CapabilitiesPage workspaceId={selectedId} onDirtyChange={setCapabilitiesDirty} onNotice={setNotice} onError={setError} />}
+          {selectedId && view === "skills" && <SkillsPage key={selectedId} workspaceId={selectedId} />}
           {selectedId && refreshing && !overview && !settings && <div className="loading-inline"><LoaderCircle className="spin" size={22} />{t("app.readingWorkspace")}</div>}
         </main>
       </div>
