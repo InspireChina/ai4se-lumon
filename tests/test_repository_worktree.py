@@ -427,7 +427,7 @@ def test_scan_history_fetch_does_not_treat_unavailable_remote_as_no_changes(
     assert not (workspace / "lumon" / "worktrees" / "_reads" / "unavailable" / "app").exists()
 
 
-def test_shallow_history_is_reported_when_the_deepen_budget_is_not_enough(
+def test_scan_fetches_full_history_when_the_deepen_budget_is_not_enough(
     repositories: tuple[Path, Path, Path, RepositoryRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -443,6 +443,7 @@ def test_shallow_history_is_reported_when_the_deepen_budget_is_not_enough(
         check=True,
     )
     monkeypatch.setattr("lumon.workspace.repository_worktree._SCAN_BOUNDARY_DEEPEN_STEPS", ())
+    monkeypatch.setattr("lumon.workspace.repository_worktree._SCAN_RETRY_DEPTH", 1)
 
     prepared = prepare_worktree(
         workspace,
@@ -452,9 +453,10 @@ def test_shallow_history_is_reported_when_the_deepen_budget_is_not_enough(
         history_since=datetime.now(UTC) - timedelta(days=7),
     )
 
-    assert prepared.shallow is True and prepared.history_covered is False
-    assert prepared.history_issue == "deepen_limit"
-    assert git(Path(prepared.path), "rev-list", "--count", "HEAD") == "2"
+    assert prepared.shallow is False and prepared.history_covered is True
+    assert prepared.history_issue is None
+    assert git(Path(prepared.path), "rev-list", "--count", "HEAD") == "3"
+    assert remove_read_worktree(workspace, record, "scan-window", prepared)
 
 
 def test_cli_can_request_history_coverage(
@@ -492,18 +494,40 @@ def test_cli_can_request_history_coverage(
     assert json.loads(result.output)["history_covered"] is True
 
 
-def test_failed_deepening_keeps_the_fresh_commit_and_marks_history_incomplete(
+@pytest.mark.parametrize(
+    ("blocked_fetches", "history_covered", "full_fetch_attempted"),
+    [
+        ("deepen", True, False),
+        ("deepen|depth", True, True),
+        ("deepen|depth|full", False, True),
+        ("date|tip", True, True),
+    ],
+    ids=["shallow-retry", "full-retry", "keeps-partial-snapshot", "no-shallow-support"],
+)
+def test_scan_recovers_from_failed_shallow_fetches(
     repositories: tuple[Path, Path, Path, RepositoryRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    blocked_fetches: str,
+    history_covered: bool,
+    full_fetch_attempted: bool,
 ) -> None:
     _workspace, source, remote, record = repositories
-    age_initial_commit(source, 30)
-    latest = advance(source, "latest\n")
+    baseline = age_initial_commit(source, 30)
+    git(source, "checkout", "-qb", "feature")
+    (source / "file.txt").write_text("latest\n", encoding="utf-8")
+    git(source, "add", "file.txt")
+    git(source, "commit", "-qm", "feature")
+    feature = git(source, "rev-parse", "HEAD")
+    git(source, "checkout", "-q", "main")
+    git(source, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    latest = git(source, "rev-parse", "HEAD")
+    git(source, "push", "-q", "origin", "main")
     workspace = tmp_path / "shallow-workspace"
-    (workspace / "repos").mkdir(parents=True)
+    checkout = workspace / record.path
+    checkout.parent.mkdir(parents=True)
     subprocess.run(
-        ["git", "clone", "-q", "--depth=1", remote.as_uri(), str(workspace / "repos" / "app")],
+        ["git", "clone", "-q", "--depth=1", remote.as_uri(), str(checkout)],
         check=True,
     )
     git_binary = shutil.which("git")
@@ -511,13 +535,28 @@ def test_failed_deepening_keeps_the_fresh_commit_and_marks_history_incomplete(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     wrapper = bin_dir / "git"
+    fetch_log = tmp_path / "fetches"
     wrapper.write_text(
-        '#!/bin/sh\ncase "$*" in *--deepen=*) exit 8;; esac\n'
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '  *" fetch "*)\n'
+        '    case " $* " in\n'
+        "      *--shallow-since=*) strategy=date;;\n"
+        '      *" --depth=1 "*) strategy=tip;;\n'
+        "      *--depth=*) strategy=depth;;\n"
+        "      *--deepen=*) strategy=deepen;;\n"
+        "      *) strategy=full;;\n"
+        "    esac\n"
+        f'    printf "%s\\n" "$strategy" >> {shlex.quote(str(fetch_log))}\n'
+        f'    case "$strategy" in {blocked_fetches}) exit 8;; esac\n'
+        "  ;;\n"
+        "esac\n"
         f'exec {shlex.quote(git_binary)} "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("GIT_DEFAULT_HASH", "sha256")
 
     prepared = prepare_worktree(
         workspace,
@@ -528,8 +567,22 @@ def test_failed_deepening_keeps_the_fresh_commit_and_marks_history_incomplete(
     )
 
     assert prepared.remote_revision == latest
-    assert prepared.history_covered is False and prepared.history_issue == "deepen_failed"
-    assert (Path(prepared.path) / "file.txt").read_text(encoding="utf-8") == "latest\n"
+    assert prepared.history_covered is history_covered
+    assert prepared.history_issue == (None if history_covered else "deepen_failed")
+    assert ("full" in fetch_log.read_text().splitlines()) is full_fetch_attempted
+    if history_covered and full_fetch_attempted:
+        assert prepared.shallow is False
+    snapshot = Path(prepared.path)
+    assert (snapshot / "file.txt").read_text(encoding="utf-8") == "latest\n"
+    if history_covered:
+        assert git(snapshot, "show", "-s", "--format=%H", "HEAD^1", "HEAD^2").splitlines() == [
+            baseline,
+            feature,
+        ]
+        assert "+latest" in git(snapshot, "diff", "HEAD^1", "HEAD", "--", "file.txt")
+    assert git(checkout, "rev-list", "HEAD") == latest
+    assert remove_read_worktree(workspace, record, "scan-window", prepared)
+    assert not list(snapshot.parent.iterdir())
 
 
 def test_concurrent_tasks_get_independent_worktrees(

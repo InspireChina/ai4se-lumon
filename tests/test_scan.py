@@ -706,6 +706,13 @@ def test_scan_reports_shallow_history_as_incomplete(
     service = ScanService(state_root=fake_service.state_root, runner=cast(AgentRunner, runner))
     monkeypatch.setattr("lumon.workspace.repository_worktree._SCAN_BOUNDARY_DEEPEN_STEPS", ())
 
+    def history_retry_failed(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "lumon.workspace.repository_worktree._retry_scan_history", history_retry_failed
+    )
+
     def no_report(_run: ScanRun, _directory: Path) -> ReportResult:
         return ReportResult(None, None)
 

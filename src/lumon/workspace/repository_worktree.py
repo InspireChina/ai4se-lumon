@@ -28,6 +28,8 @@ _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _HISTORY_DEEPEN_STEPS = (256, 1024)
 _SCAN_BOUNDARY_DEEPEN_STEPS = (1, 4, 16, 64, 256, 1024)
+_SCAN_RETRY_DEPTH = 8
+_FULL_HISTORY_FETCH_TIMEOUT = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,26 +270,23 @@ def _prepare_locked(
         _verify_source(source, repository)
     reference = f"refs/lumon/prepared/{uuid4().hex}"
     try:
-        if isolated_history and history_since is not None:
-            try:
-                revision = _fetch_revision(source, repository, reference, since=history_since)
-            except PreflightError:
-                revision = _fetch_revision(source, repository, reference, depth=1)
-        else:
-            revision = _fetch_revision(source, repository, reference)
         history_covered = None
         history_issue = None
-        if history_since is not None:
-            revision, history_covered, history_issue = _cover_history(
-                source,
-                repository,
-                reference,
-                revision,
-                history_since,
-                steps=_SCAN_BOUNDARY_DEEPEN_STEPS if isolated_history else _HISTORY_DEEPEN_STEPS,
+        if isolated_history and history_since is not None:
+            revision, history_covered, history_issue = _prepare_scan_history(
+                source, repository, reference, history_since
             )
-        if isolated_history:
-            _dissociate_history(source, reference)
+        else:
+            revision = _fetch_revision(source, repository, reference)
+            if history_since is not None:
+                revision, history_covered, history_issue = _cover_history(
+                    source,
+                    repository,
+                    reference,
+                    revision,
+                    history_since,
+                    steps=_HISTORY_DEEPEN_STEPS,
+                )
         shallow = _git(source, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
         fetched_at = datetime.now(UTC).isoformat()
         reused = destination.exists() or destination.is_symlink()
@@ -332,6 +331,7 @@ def _fetch_revision(
     deepen: int | None = None,
     since: datetime | None = None,
     depth: int | None = None,
+    timeout: int = 60,
 ) -> str:
     arguments = [
         "fetch",
@@ -347,7 +347,7 @@ def _fetch_revision(
     if depth is not None:
         arguments.append(f"--depth={depth}")
     arguments.extend(("origin", f"+refs/heads/{repository.branch}:{reference}"))
-    _git(source, *_github_git_config(repository), *arguments)
+    _git(source, *_github_git_config(repository), *arguments, timeout=timeout)
     revision = _git(source, "rev-parse", "--verify", reference).stdout.strip()
     if not _REVISION.fullmatch(revision):
         raise PreflightError(f"Repository '{repository.name}' returned an invalid revision.")
@@ -365,6 +365,87 @@ def _dissociate_history(source: Path, reference: str) -> None:
         _git(source, "repack", "-a", "-d")
         alternates.unlink(missing_ok=True)
     _git(source, "fsck", "--connectivity-only", reference)
+
+
+def _prepare_scan_history(
+    source: Path, repository: RepositoryRecord, reference: str, since: datetime
+) -> tuple[str, bool, HistoryIssue | None]:
+    try:
+        try:
+            revision = _fetch_revision(source, repository, reference, since=since)
+        except PreflightError:
+            revision = _fetch_revision(source, repository, reference, depth=1)
+        revision, covered, issue = _cover_history(
+            source, repository, reference, revision, since, steps=_SCAN_BOUNDARY_DEEPEN_STEPS
+        )
+    except PreflightError:
+        recovered = _retry_scan_history(source, repository, reference, since, depths=(None,))
+        if recovered is None:
+            raise
+        return recovered, True, None
+
+    if not covered:
+        recovered = _retry_scan_history(
+            source, repository, reference, since, depths=(_SCAN_RETRY_DEPTH, None)
+        )
+        if recovered is not None:
+            return recovered, True, None
+    _dissociate_history(source, reference)
+    return revision, covered, issue
+
+
+def _retry_scan_history(
+    source: Path,
+    repository: RepositoryRecord,
+    reference: str,
+    since: datetime,
+    *,
+    depths: tuple[int | None, ...],
+) -> str | None:
+    # Keep each attempt isolated from shallow markers left by earlier fetches.
+    object_format = _git(source, "rev-parse", "--show-object-format").stdout.strip()
+    with tempfile.TemporaryDirectory(prefix=".history-retry-", dir=source.parent) as directory:
+        staging = Path(directory)
+        for depth in depths:
+            retry = staging / ("full.git" if depth is None else "shallow.git")
+            try:
+                _git(
+                    staging, "init", "--bare", f"--object-format={object_format}", "--", str(retry)
+                )
+                _git(retry, "remote", "add", "origin", repository.url)
+                timeout = _FULL_HISTORY_FETCH_TIMEOUT if depth is None else 60
+                revision = _fetch_revision(
+                    retry, repository, reference, depth=depth, timeout=timeout
+                )
+                if depth is None:
+                    shallow = _git(retry, "rev-parse", "--is-shallow-repository").stdout.strip()
+                    if shallow != "false":
+                        continue
+                else:
+                    revision, covered, _issue = _cover_history(
+                        retry,
+                        repository,
+                        reference,
+                        revision,
+                        since,
+                        steps=_SCAN_BOUNDARY_DEEPEN_STEPS,
+                    )
+                    if not covered:
+                        continue
+                _git(retry, "fsck", "--connectivity-only", reference, timeout=timeout)
+            except PreflightError:
+                continue
+            break
+        else:
+            return None
+
+        original = source.rename(staging / "original.git")
+        try:
+            retry.rename(source)
+        except OSError:
+            original.rename(source)
+            raise
+        return revision
 
 
 def _github_git_config(repository: RepositoryRecord) -> tuple[str, ...]:
@@ -498,7 +579,7 @@ def _validate_destination(root: Path, destination: Path) -> None:
 
 
 def _git(
-    directory: Path, *arguments: str, allowed: tuple[int, ...] = (0,)
+    directory: Path, *arguments: str, allowed: tuple[int, ...] = (0,), timeout: int = 60
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["GIT_TERMINAL_PROMPT"] = "0"
@@ -508,7 +589,7 @@ def _git(
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=timeout,
             env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
