@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 from lumon.agents.agent.config import AgentConfig, AgentConfigStore
-from lumon.agents.agent.feishu import AgentFeishuChannel, MessageHandler
+from lumon.agents.agent.feishu import AgentFeishuChannel, MessageHandler, RecallHandler
 from lumon.agents.agent.model import (
     AgentErrorCode,
     AgentEvent,
@@ -188,7 +190,7 @@ class FakeChannel(AgentFeishuChannel):
     async def connect(
         self,
         on_message: MessageHandler,
-        on_recalled: object = None,
+        on_recalled: RecallHandler | None = None,
     ) -> None:
         del on_message, on_recalled
 
@@ -1067,6 +1069,105 @@ def reload_message(event_id: str, *, chat_id: str = "oc-reload") -> InboundMessa
         sender_id="ou-1",
         sender_type="user",
     )
+
+
+@pytest.mark.parametrize("history_outcome", ["success", "denied", "timeout"])
+def test_startup_history_deduplicates_live_delivery_and_recovers_pending_work(
+    reload_runtime: ReloadRuntime, history_outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = reload_runtime
+    now = datetime(2026, 11, 17, 12, tzinfo=UTC)
+    history_succeeds = history_outcome == "success"
+    if history_outcome == "timeout":
+        monkeypatch.setattr("lumon.agents.agent.service._STARTUP_HISTORY_TIMEOUT_SECONDS", 0)
+    pending = reload_message("already-queued")
+    missed = reload_message("offline-request")
+    recalled = reload_message("recalled-request")
+    live = reload_message("new-live-request")
+    store = AgentSessionStore(
+        db_path=runtime.service.session_store.path, now=lambda: now - timedelta(days=2)
+    )
+    assert store.claim_event(pending.event_id, pending)
+    group = replace(reload_message("group", chat_id="oc-group"), chat_type="group")
+    assert store.claim_event(group.event_id, group)
+    store.mark_event_status(group.event_id, "succeeded")
+
+    class HistoryChannel(FakeChannel):
+        on_message: MessageHandler
+        on_recalled: RecallHandler
+        reading = asyncio.Event()
+        release = asyncio.Event()
+        fetched: list[str]
+
+        async def connect(
+            self, on_message: MessageHandler, on_recalled: RecallHandler | None = None
+        ) -> None:
+            assert on_recalled is not None
+            self.on_message, self.on_recalled = on_message, on_recalled
+            self.fetched = []
+
+        async def direct_history_ids(
+            self, chat_id: str, *, start_ms: int, end_ms: int
+        ) -> AsyncIterator[str]:
+            assert chat_id == pending.chat_id
+            assert end_ms == int(now.timestamp() * 1000)
+            assert end_ms - start_ms == 24 * 60 * 60 * 1000
+            self.reading.set()
+            await self.release.wait()
+            if history_outcome == "denied":
+                raise AgentRuntimeError("history permission unavailable")
+            yield pending.event_id
+            yield recalled.event_id
+            yield missed.event_id
+
+        async def fetch_direct_history_message(
+            self, chat_id: str, message_id: str
+        ) -> InboundMessage:
+            assert chat_id == missed.chat_id
+            self.fetched.append(message_id)
+            return missed
+
+    channel = HistoryChannel(runtime.config)
+    service = AgentService(
+        config_store=runtime.config_store,
+        registry=runtime.service.registry,
+        session_store=store,
+        channel=channel,
+        now=lambda: now,
+        telemetry=runtime.telemetry,
+    )
+
+    async def run() -> None:
+        startup = asyncio.create_task(service.run_forever())
+        try:
+            await channel.reading.wait()
+            await channel.on_recalled(RecalledMessage("recall", recalled.event_id))
+            if history_outcome != "timeout":
+                duplicate = asyncio.create_task(channel.on_message(missed))
+                await asyncio.sleep(0)
+                assert not duplicate.done()
+                channel.release.set()
+                await duplicate
+            await channel.on_message(live)
+            await service.wait_for_idle()
+        finally:
+            await service.stop()
+            await startup
+
+    async def bounded_run() -> None:
+        async with asyncio.timeout(5):
+            await run()
+
+    asyncio.run(bounded_run())
+
+    assert store.event_status(pending.event_id) == "succeeded"
+    assert store.event_status(recalled.event_id) is None
+    assert store.event_status(live.event_id) == "succeeded"
+    assert channel.fetched == ([missed.event_id] if history_succeeds else [])
+    expected = [pending.message_id]
+    if history_outcome != "timeout":
+        expected.append(missed.message_id)
+    assert channel.typing_added == [*expected, live.message_id]
 
 
 @pytest.mark.parametrize(

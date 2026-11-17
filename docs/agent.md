@@ -300,6 +300,11 @@ lumon agent status
 lumon agent stop
 ```
 
+启动时，Lumon 会尝试补收已知飞书私聊在最近 24 小时内漏掉的消息，再处理该私聊的实时消息。
+已入库的消息和已撤回的消息会跳过。首次私聊和群聊依赖飞书的实时事件投递。
+补收需要机器人有[获取会话历史消息](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list)的权限。
+如果读取失败或超过 15 秒，Agent 会记录警告并继续接收实时消息。下次启动会在时间窗口内重试。
+
 Agent 当前使用 `full_access` 的 Agent 执行模式，具体由 Codex runner 实现。它允许
 用户通过飞书明确要求的 Workspace 内命令和文件操作直接执行；因此不要把密码、Token、Webhook、私钥等
 敏感信息放进 Workspace，也不要在不清楚影响时要求 Agent 执行删除、重置、发布或

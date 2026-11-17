@@ -254,7 +254,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1,<9" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "langfuse", specifier = ">=4,<5" },
-    { name = "lark-channel-sdk", specifier = ">=1,<2" },
+    { name = "lark-channel-sdk", specifier = ">=1.4,<2" },
     { name = "typer", specifier = ">=0.15,<1" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]

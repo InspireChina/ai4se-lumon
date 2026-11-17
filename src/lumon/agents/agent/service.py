@@ -11,7 +11,7 @@ import traceback
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -61,6 +61,8 @@ from lumon.workspace.registry import WorkspaceRegistry
 logger = logging.getLogger(__name__)
 _CODEX_TRACE_CONTENT_LIMIT = 4096
 _AGENT_ERROR_LOG_LIMIT = 16 * 1024
+_STARTUP_HISTORY_WINDOW = timedelta(hours=24)
+_STARTUP_HISTORY_TIMEOUT_SECONDS = 15
 
 
 @dataclass(slots=True)
@@ -111,26 +113,87 @@ class AgentService:
     async def run_forever(self) -> None:
         """Start the Feishu WebSocket lifecycle and recover pending messages."""
 
+        recovery_task: asyncio.Task[None] | None = None
         try:
             self._ensure_runtime()
             assert self._channel is not None
             if self._context_builder is None:
                 raise AgentRuntimeError("Agent Workspace context is not ready.")
             self._context_builder.resolve_workspace()
-            self._stop_event = asyncio.Event()
+            stop_event = self._stop_event = asyncio.Event()
+            known_chats = self.session_store.known_direct_chats()
+            recovery_complete = asyncio.Event()
+            recalled_during_startup: set[str] = set()
+
+            async def on_message(message: InboundMessage) -> None:
+                if not message.is_group and message.chat_id in known_chats:
+                    await recovery_complete.wait()
+                if message.message_id not in recalled_during_startup:
+                    await self.handle_message(message)
+
+            async def on_recalled(message: RecalledMessage) -> None:
+                if not recovery_complete.is_set():
+                    recalled_during_startup.add(message.message_id)
+                await self.handle_recalled(message)
+
+            await self._channel.connect(on_message, on_recalled)
+            if self._stopping:
+                return
             for message in self.session_store.recover_pending():
                 session = self.session_store.get_or_create_session(message)
                 self._schedule(message, session.session_id)
-            await self._channel.connect(self.handle_message, self.handle_recalled)
-        except asyncio.CancelledError:
-            raise
+            recovery_task = asyncio.create_task(
+                self._recover_direct_history(
+                    known_chats, recovery_complete, recalled_during_startup
+                )
+            )
+            await stop_event.wait()
         finally:
+            if recovery_task is not None:
+                recovery_task.cancel()
+                await asyncio.gather(recovery_task, return_exceptions=True)
             await self._shutdown_tasks()
             try:
                 if self._channel is not None:
                     await self._channel.disconnect()
             finally:
                 self._shutdown_telemetry()
+
+    async def _recover_direct_history(
+        self,
+        known_chats: dict[str, datetime],
+        recovery_complete: asyncio.Event,
+        recalled: set[str],
+    ) -> None:
+        channel = self._channel
+        assert channel is not None
+        end_time = self._now()
+        # shortcut: recover recent known DMs, add a durable cursor if longer outages are needed.
+        earliest = end_time - _STARTUP_HISTORY_WINDOW
+        end_ms = int(end_time.timestamp() * 1000)
+        try:
+            async with asyncio.timeout(_STARTUP_HISTORY_TIMEOUT_SECONDS):
+                for chat_id, known_since in known_chats.items():
+                    start_ms = int(max(earliest, known_since).timestamp() * 1000)
+                    try:
+                        async for message_id in channel.direct_history_ids(
+                            chat_id, start_ms=start_ms, end_ms=end_ms
+                        ):
+                            if message_id in recalled or self.session_store.event_status(
+                                message_id
+                            ):
+                                continue
+                            message = await channel.fetch_direct_history_message(
+                                chat_id, message_id
+                            )
+                            if message is not None and message_id not in recalled:
+                                await self.handle_message(message)
+                    except AgentRuntimeError:
+                        logger.warning("Feishu direct chat history unavailable. Check bot access.")
+        except TimeoutError:
+            logger.warning("Feishu startup chat recovery timed out.")
+        finally:
+            recovery_complete.set()
 
     async def stop(self) -> None:
         """Request a graceful stop for the channel and in-flight message tasks."""

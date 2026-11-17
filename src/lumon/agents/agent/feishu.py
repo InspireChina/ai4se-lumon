@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -12,8 +13,8 @@ from lumon.agents.agent.config import AgentConfig
 from lumon.agents.agent.model import InboundImage, InboundMessage, RecalledMessage
 from lumon.errors import AgentRuntimeError
 
-MessageHandler = Callable[[InboundMessage], Awaitable[None]]
-RecallHandler = Callable[[RecalledMessage], Awaitable[None]]
+MessageHandler = Callable[[InboundMessage], Coroutine[object, object, None]]
+RecallHandler = Callable[[RecalledMessage], Coroutine[object, object, None]]
 _RECALL_EVENT_TYPE = "im.message.recalled_v1"
 
 # Load the SDK before ``asyncio.run`` creates Agent's runtime loop. The SDK's
@@ -36,13 +37,14 @@ class AgentFeishuChannel:
         self._channel: Any = None
         self._handler: MessageHandler | None = None
         self._recall_handler: RecallHandler | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def connect(
         self,
         on_message: MessageHandler,
         on_recalled: RecallHandler | None = None,
     ) -> None:
-        """Connect the SDK's WebSocket transport and keep it running."""
+        """Start the WebSocket transport and wait for the connection to be ready."""
 
         module = _sdk_module
         if module is None:
@@ -53,6 +55,7 @@ class AgentFeishuChannel:
 
         self._handler = on_message
         self._recall_handler = on_recalled
+        self._loop = asyncio.get_running_loop()
         try:
             policy_type = module.PolicyConfig
             inbound_type = module.InboundConfig
@@ -80,7 +83,7 @@ class AgentFeishuChannel:
                         "The lark-channel-sdk dependency cannot receive recall events."
                     )
                 raw_event_subscriber(_RECALL_EVENT_TYPE, self._on_sdk_recalled)
-            await self._channel.connect()
+            await self._channel.start_background()
         except Exception as exc:
             raise AgentRuntimeError("Feishu WebSocket connection failed.") from exc
 
@@ -89,13 +92,82 @@ class AgentFeishuChannel:
 
         channel = self._channel
         self._channel = None
+        self._handler = None
         self._recall_handler = None
+        self._loop = None
         if channel is None:
             return
         try:
             await channel.disconnect()
         except Exception as exc:
             raise AgentRuntimeError("Feishu WebSocket disconnect failed.") from exc
+
+    async def direct_history_ids(
+        self, chat_id: str, *, start_ms: int, end_ms: int
+    ) -> AsyncIterator[str]:
+        """List messages from users in the requested direct chat and time range."""
+
+        channel = self._channel
+        if channel is None:
+            raise AgentRuntimeError("Feishu channel is not connected.")
+        try:
+            requests = importlib.import_module("lark_channel.api.im.v1.model.list_message_request")
+            page_token = ""
+            while True:
+                builder = (
+                    requests.ListMessageRequest.builder()
+                    .container_id_type("chat")
+                    .container_id(chat_id)
+                    .start_time(str(start_ms // 1000))
+                    .end_time(str((end_ms + 999) // 1000))
+                    .sort_type("ByCreateTimeAsc")
+                    .page_size(50)
+                )
+                if page_token:
+                    builder.page_token(page_token)
+                response = await channel.client.im.v1.message.alist(builder.build())
+                if not response.success() or response.data is None:
+                    raise AgentRuntimeError("Feishu rejected the chat history request.")
+                page = response.data
+                for item in page.items or ():
+                    message_id = _history_message_id(item, chat_id, start_ms, end_ms)
+                    if message_id is not None:
+                        yield message_id
+                if not page.has_more:
+                    return
+                next_token: object = page.page_token
+                if not isinstance(next_token, str) or not next_token or next_token == page_token:
+                    raise AgentRuntimeError("Feishu history has an invalid next page.")
+                page_token = next_token
+        except AgentRuntimeError:
+            raise
+        except Exception as exc:
+            raise AgentRuntimeError("Feishu chat history could not be read.") from exc
+
+    async def fetch_direct_history_message(
+        self, chat_id: str, message_id: str
+    ) -> InboundMessage | None:
+        """Load a history item through the SDK's normal content and resource pipeline."""
+
+        if self._channel is None:
+            raise AgentRuntimeError("Feishu channel is not connected.")
+        try:
+            raw = await self._channel.fetch_inbound_message(message_id)
+        except Exception as exc:
+            raise AgentRuntimeError("Feishu history message could not be read.") from exc
+        if _raw_message_value(_value(raw, "raw", {}), "deleted") is True:
+            return None
+        message = normalize_message(raw)
+        if (
+            message is None
+            or message.chat_id != chat_id
+            or message.message_id != message_id
+            or message.sender_type.casefold() != "user"
+        ):
+            return None
+        # The history endpoints omit chat_type. The caller lists only known DMs.
+        direct_message = replace(message, chat_type="p2p")
+        return await self._attach_quoted_message(direct_message, raw)
 
     async def add_typing(self, message_id: str) -> str | None:
         """Add the SDK's ``Typing`` reaction to an inbound message."""
@@ -200,12 +272,13 @@ class AgentFeishuChannel:
             raise AgentRuntimeError("Feishu message send failed.")
 
     async def _on_sdk_message(self, raw_message: Any) -> None:
-        if self._handler is None:
+        handler, loop = self._handler, self._loop
+        if handler is None or loop is None:
             return
         message = normalize_message(raw_message)
         if message is not None:
             message = await self._attach_quoted_message(message, raw_message)
-            await self._handler(message)
+            await _dispatch_to_agent(loop, handler(message))
 
     async def _attach_quoted_message(
         self,
@@ -245,16 +318,46 @@ class AgentFeishuChannel:
         )
 
     async def _on_sdk_recalled(self, raw_message: Any) -> None:
-        if self._recall_handler is None:
+        handler, loop = self._recall_handler, self._loop
+        if handler is None or loop is None:
             return
         message = normalize_recalled_message(raw_message)
         if message is not None:
-            await self._recall_handler(message)
+            await _dispatch_to_agent(loop, handler(message))
 
     async def _on_sdk_error(self, _error: Any) -> None:
         """Consume SDK error callbacks without echoing potentially sensitive details."""
 
         return None
+
+
+def _history_message_id(item: object, chat_id: str, start_ms: int, end_ms: int) -> str | None:
+    if _value(item, "chat_id", None) != chat_id or _value(item, "deleted", None) is not False:
+        return None
+    sender = _value(item, "sender", None)
+    if _value(sender, "sender_type", None) != "user":
+        return None
+    created_at = _value(item, "create_time", None)
+    if not isinstance(created_at, (str, int)):
+        return None
+    try:
+        created_ms = int(created_at)
+    except ValueError:
+        return None
+    if not start_ms <= created_ms <= end_ms:
+        return None
+    message_id = _value(item, "message_id", None)
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
+async def _dispatch_to_agent(
+    loop: asyncio.AbstractEventLoop, callback: Coroutine[object, object, None]
+) -> None:
+    # The SDK calls handlers on its own thread. Agent queues and tasks share one loop.
+    if asyncio.get_running_loop() is loop:
+        await callback
+    else:
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(callback, loop))
 
 
 def normalize_message(raw: object) -> InboundMessage | None:

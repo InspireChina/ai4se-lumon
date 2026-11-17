@@ -675,6 +675,24 @@ class AgentSessionStore:
             ).fetchall()
         return tuple(_inbound_from_row(row) for row in rows)
 
+    def known_direct_chats(self) -> dict[str, datetime]:
+        """Return direct chats and the time Lumon first received a message in each."""
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT chat_id, MIN(received_at) AS first_received_at
+                FROM events
+                WHERE lower(chat_type) IN ('p2p', 'private', 'dm')
+                  AND lower(sender_type) = 'user'
+                GROUP BY chat_id
+                ORDER BY MAX(received_at) DESC
+                """
+            ).fetchall()
+        return {
+            str(row["chat_id"]): datetime.fromisoformat(row["first_received_at"]) for row in rows
+        }
+
     def event_status(self, event_id: str) -> str | None:
         """Return one event's status for diagnostics and tests."""
 

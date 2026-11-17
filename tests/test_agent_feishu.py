@@ -166,7 +166,7 @@ class _FakeSdkChannel:
     def on_raw_event(self, event: str, handler: Any) -> None:
         self.raw_handlers[event] = handler
 
-    async def connect(self) -> None:
+    async def start_background(self) -> None:
         return None
 
     async def disconnect(self) -> None:
@@ -210,6 +210,71 @@ def test_got_it_reacts_to_the_original_message(monkeypatch: pytest.MonkeyPatch) 
 
     assert sdk_channel.reactions == [("om-followup", "Get")]
     assert sdk_channel.sent == []
+
+
+def test_direct_history_pages_skip_non_user_and_recalled_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk_channel = _FakeSdkChannel()
+    channel = AgentFeishuChannel(AgentConfig())
+    monkeypatch.setattr(channel, "_channel", sdk_channel)
+    seen_pages: list[str | None] = []
+
+    def item(message_id: str, **fields: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            **{
+                "message_id": message_id,
+                "chat_id": "oc_1",
+                "deleted": False,
+                "create_time": "12340",
+                "sender": SimpleNamespace(sender_type="user"),
+                **fields,
+            }
+        )
+
+    async def list_history(request: Any) -> SimpleNamespace:
+        assert request.container_id_type == "chat"
+        assert request.container_id == "oc_1"
+        assert request.sort_type == "ByCreateTimeAsc"
+        assert (request.start_time, request.end_time) == ("12", "13")
+        seen_pages.append(request.page_token)
+        if request.page_token is None:
+            page = SimpleNamespace(
+                has_more=True,
+                page_token="next",
+                items=[
+                    item("om_1"),
+                    item("recalled", deleted=True),
+                    item("bot", sender=SimpleNamespace(sender_type="app")),
+                    item("other", chat_id="oc_other"),
+                    item("newer", create_time="12401"),
+                ],
+            )
+        else:
+            assert request.page_token == "next"
+            page = SimpleNamespace(has_more=False, items=[item("om_2", create_time=12341)])
+        return SimpleNamespace(success=lambda: True, data=page)
+
+    client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(alist=list_history)))
+    )
+    monkeypatch.setattr(sdk_channel, "client", client, raising=False)
+    sdk_channel.quoted_messages["om_1"] = _raw("unknown", "offline request")
+
+    async def run() -> None:
+        recovered_ids = [
+            message_id
+            async for message_id in channel.direct_history_ids("oc_1", start_ms=12300, end_ms=12400)
+        ]
+        assert recovered_ids == ["om_1", "om_2"]
+        recovered = await channel.fetch_direct_history_message("oc_1", "om_1")
+        assert recovered is not None
+        assert recovered.admitted and not recovered.is_group
+        assert recovered.text == "offline request"
+        assert await channel.fetch_direct_history_message("oc_other", "om_1") is None
+
+    asyncio.run(run())
+    assert seen_pages == [None, "next"]
 
 
 def test_got_it_reaction_reports_sdk_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -629,7 +694,9 @@ def test_quoted_image_download_uses_parent_message_id(
     assert sdk_channel.downloaded_file_names == ["original.png"]
 
 
-def test_channel_registers_recalled_event(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_channel_dispatches_sdk_thread_callbacks_on_the_agent_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         feishu_module,
         "_sdk_module",
@@ -642,26 +709,35 @@ def test_channel_registers_recalled_event(monkeypatch: pytest.MonkeyPatch) -> No
     channel = AgentFeishuChannel(
         AgentConfig(feishu_app_id="cli_test", feishu_app_secret="secret-value")
     )
-    recalled: list[RecalledMessage] = []
 
     async def run() -> None:
-        async def handler(_message: InboundMessage) -> None:
-            return None
+        loop = asyncio.get_running_loop()
+        received: list[str] = []
+        recalled: list[str] = []
+
+        async def handler(message: InboundMessage) -> None:
+            assert asyncio.get_running_loop() is loop
+            received.append(message.message_id)
 
         async def on_recalled(message: RecalledMessage) -> None:
-            recalled.append(message)
+            assert asyncio.get_running_loop() is loop
+            recalled.append(message.message_id)
 
         await channel.connect(handler, on_recalled)
         sdk_channel = _FakeSdkChannel.instance
         assert sdk_channel is not None
-        await sdk_channel.raw_handlers["im.message.recalled_v1"](
-            {
-                "header": {"event_id": "recall-event"},
-                "event": {"message_id": "om-1", "chat_id": "oc-1"},
-            }
-        )
+
+        async def sdk_events() -> None:
+            await sdk_channel.handlers["message"](_raw("p2p", "hello"))
+            await sdk_channel.raw_handlers["im.message.recalled_v1"](
+                {
+                    "header": {"event_id": "recall-event"},
+                    "event": {"message_id": "om_1", "chat_id": "oc_1"},
+                }
+            )
+
+        await asyncio.to_thread(asyncio.run, sdk_events())
         await channel.disconnect()
+        assert received == recalled == ["om_1"]
 
     asyncio.run(run())
-
-    assert recalled == [RecalledMessage(event_id="recall-event", message_id="om-1", chat_id="oc-1")]
