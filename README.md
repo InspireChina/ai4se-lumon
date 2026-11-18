@@ -1,15 +1,13 @@
-# Lumon v1
+# Lumon
 
-Lumon v1 is the greenfield Python CLI and local Dashboard for creating,
-inspecting, and switching between local Workspaces. The v1 runtime contains
-the CLI, Workspace skeleton, bundled global planning Skills installation, and
-the Dashboard's Workspace overview, typed settings, and editable flows.
+Lumon is a command-line tool and local Dashboard for managing engineering
+Workspaces. Use it to connect GitHub repositories, run Workflows, schedule
+Auto Scan and Auto Delivery, and work with the Agent in Feishu.
 
 ## Install from GitHub
 
-Lumon is distributed only through this GitHub repository. Stable releases are
-attached to GitHub Releases; the CI build is also retained as a GitHub Actions
-Artifact. Lumon is not published to PyPI or another public package index.
+Download stable packages from [Lumon Releases](https://github.com/InspireChina/ai4se-lumon/releases).
+GitHub Actions also retains CI build artifacts.
 
 For a one-command Shell installation, use the installer in
 `packaging/install.sh`. It does not use uv; it creates an isolated Python 3.12
@@ -23,20 +21,20 @@ repository. The matching uninstaller is `packaging/uninstall.sh`.
 For the public repository, install the latest stable Release with:
 
 ```text
-curl -fsSL https://raw.githubusercontent.com/zchengb/lumon/release/packaging/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InspireChina/ai4se-lumon/main/packaging/install.sh | bash
 ```
 
 To pin a version, append the installer argument after `bash -s --`:
 
 ```text
-curl -fsSL https://raw.githubusercontent.com/zchengb/lumon/release/packaging/install.sh | bash -s -- --version v1.1.0
+curl -fsSL https://raw.githubusercontent.com/InspireChina/ai4se-lumon/main/packaging/install.sh | bash -s -- --version v2.1.4
 ```
 
 The installer does not modify a Workspace or remove global Skills. To remove
 the Shell installation later, run:
 
 ```text
-curl -fsSL https://raw.githubusercontent.com/zchengb/lumon/release/packaging/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InspireChina/ai4se-lumon/main/packaging/uninstall.sh | bash
 ```
 
 After a newer GitHub Release is published, a Shell-installed CLI can update
@@ -47,14 +45,21 @@ lumon update
 lumon update --check
 ```
 
+Lumon v2.1.5 and later use the organization repository by default. If you have
+v2.1.4 or earlier, select the organization repository for the first update:
+
+```text
+lumon update --repository InspireChina/ai4se-lumon
+```
+
 For a private repository, provide `LUMON_GITHUB_TOKEN` in the process
 environment when checking or applying an update. Tokens are never written to
 the Workspace or command output. Existing installations made with uv retain
 their uv-based update path.
 
-Each push to `release` runs tests and uploads a temporary build artifact. A
-semantic version tag such as `v1.1.0` runs the release workflow, which attaches
-the Wheel, source distribution, and `SHA256SUMS` to a GitHub Release.
+Pushes to `main` or `release` run CI and upload a build artifact. A version tag
+such as `v2.1.5` also publishes a wheel, source distribution, and checksums under
+GitHub Releases.
 
 ## Initialize a Workspace
 
@@ -188,10 +193,6 @@ The profile is per user and per Workspace. Webhook URLs are not written to
 the Workspace repository, returned by the Dashboard API, or included in
 Lumon logs. Existing Workspace directories are not discovered by scanning;
 add them explicitly from the onboarding page or with `lumon ui --workspace`.
-
-The v1 source tree intentionally contains only the new `src/lumon` modules,
-the Dashboard frontend source, and the unified `tests` directory. The old
-main branch Dashboard and runtime are not imported or packaged.
 
 ## Agent
 

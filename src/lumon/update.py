@@ -20,7 +20,7 @@ from typing import Protocol, cast
 from lumon.errors import UpdateError
 from lumon.version import __version__
 
-DEFAULT_GITHUB_REPOSITORY = "zchengb/lumon"
+DEFAULT_GITHUB_REPOSITORY = "InspireChina/ai4se-lumon"
 _GITHUB_API = "https://api.github.com"
 _VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 

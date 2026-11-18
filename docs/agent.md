@@ -136,7 +136,7 @@ Agent 可以把每条已处理的飞书消息记录为一个 Langfuse trace。�
 Shell 安装会自动包含 Langfuse SDK：
 
 ```text
-curl -fsSL https://raw.githubusercontent.com/zchengb/lumon/release/packaging/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InspireChina/ai4se-lumon/main/packaging/install.sh | bash
 ```
 
 在 Langfuse Cloud 创建项目并生成 project API keys。可以在 Dashboard 的 **Agent** 页面填写并保存凭据，也可以把凭据放在运行 Agent 的进程环境中。环境变量
