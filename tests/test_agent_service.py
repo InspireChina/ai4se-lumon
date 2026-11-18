@@ -23,6 +23,7 @@ from lumon.agents.agent.model import (
     AgentResult,
     InboundImage,
     InboundMessage,
+    Message,
     ProgressPhase,
     RecalledMessage,
 )
@@ -1041,7 +1042,8 @@ def reload_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReloadRun
     config_store.save(config)
     runners: list[tuple[AgentConfig, FakeRunner]] = []
 
-    def create_runner(execution_config: AgentConfig) -> AgentRunner:
+    def create_runner(execution_config: AgentConfig, *, codex_home: Path) -> AgentRunner:
+        assert codex_home == state_root / "codex-agent"
         runner = FakeRunner()
         runners.append((execution_config, runner))
         return runner
@@ -1069,6 +1071,41 @@ def reload_message(event_id: str, *, chat_id: str = "oc-reload") -> InboundMessa
         sender_id="ou-1",
         sender_type="user",
     )
+
+
+def test_feishu_replaces_legacy_codex_thread_and_resumes_the_isolated_thread(
+    reload_runtime: ReloadRuntime,
+) -> None:
+    runtime = reload_runtime
+    store = runtime.service.session_store
+    first = reload_message("first-after-cutover")
+    session = store.get_or_create_session(first)
+    store.bind_agent_session(session.session_id, "desktop-thread")
+    store.record_message(
+        Message(
+            conversation_key=first.conversation_key,
+            direction="outbound",
+            text="Earlier Feishu reply",
+            created_at=datetime.now(UTC).isoformat(),
+            session_id=session.session_id,
+        )
+    )
+
+    async def run() -> None:
+        for message in (first, reload_message("continue-after-cutover")):
+            await runtime.service.handle_message(message)
+            await runtime.service.wait_for_idle()
+        await runtime.service.stop()
+
+    asyncio.run(run())
+
+    runner = runtime.runners[0][1]
+    assert runner.agent_session_ids == [None, "provider-session-1"]
+    assert "Earlier Feishu reply" in runner.prompts[0]
+    assert "Earlier Feishu reply" not in runner.prompts[1]
+    saved = store.get_session(session.session_id)
+    assert saved is not None
+    assert saved.agent_session_home == str(runtime.config_store.codex_home)
 
 
 @pytest.mark.parametrize("history_outcome", ["success", "denied", "timeout"])

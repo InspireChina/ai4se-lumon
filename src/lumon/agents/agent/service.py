@@ -95,6 +95,7 @@ class AgentService:
         self.soul_loader = soul_loader or SoulLoader()
         self.agent_runner = agent_runner
         self._owns_agent_runner = agent_runner is None
+        self._codex_home = self.config_store.codex_home if self._owns_agent_runner else None
         self._channel = channel
         self._now = now or (lambda: datetime.now(UTC))
         self._telemetry = telemetry
@@ -284,7 +285,7 @@ class AgentService:
                 logger.warning("Agent telemetry setup failed (%s).", type(exc).__name__)
                 self._telemetry = NoopAgentTelemetry()
         if self.agent_runner is None:
-            self.agent_runner = create_agent_runner(config)
+            self.agent_runner = create_agent_runner(config, codex_home=self._codex_home)
         if self._channel is None:
             self._channel = AgentFeishuChannel(config)
 
@@ -297,7 +298,7 @@ class AgentService:
         )
         runner = self.agent_runner
         if runner is None or (self._owns_agent_runner and execution_config != config):
-            runner = create_agent_runner(execution_config)
+            runner = create_agent_runner(execution_config, codex_home=self._codex_home)
         # Keep connection settings fixed, and never mutate a runner used by an active turn.
         self._config = execution_config
         self.agent_runner = runner
@@ -427,6 +428,11 @@ class AgentService:
                     stage = "clear_mismatched_agent_session"
                     self.session_store.clear_agent_session(session_id)
                     resume_session_id = None
+                if self._codex_home is not None and session.agent_session_home != str(
+                    self._codex_home
+                ):
+                    # The prior thread belongs to a different Codex process profile.
+                    resume_session_id = None
                 if resume_session_id is None:
                     stage = "load_history"
                     async with trace.span("history.load") as history_span:
@@ -551,6 +557,7 @@ class AgentService:
                     self.session_store.bind_agent_session(
                         session_id,
                         result.agent_session_id,
+                        codex_home=self._codex_home,
                     )
                 status = result.status
                 error_code = result.error_code.value if result.error_code is not None else None

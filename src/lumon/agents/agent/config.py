@@ -151,6 +151,12 @@ class AgentConfigStore:
 
         return self.layout.root / "agent.toml"
 
+    @property
+    def codex_home(self) -> Path:
+        """Return the Feishu Agent's private Codex profile directory."""
+
+        return self.layout.root / "codex-agent"
+
     def load(self) -> AgentConfig:
         """Load and validate Agent configuration without exposing secret values."""
 

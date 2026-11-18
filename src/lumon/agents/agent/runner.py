@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
@@ -208,7 +209,21 @@ class AgentRunner(Protocol):
         ...
 
 
-def create_agent_runner(config: AgentConfig | None = None) -> AgentRunner:
+def agent_codex_environment(codex_home: Path) -> dict[str, str]:
+    """Separate both the session files and their index from desktop Codex."""
+
+    if codex_home.is_symlink():
+        raise AgentConfigError(f"The Agent Codex profile must be a local directory: {codex_home}")
+    return {
+        **os.environ,
+        "CODEX_HOME": str(codex_home),
+        "CODEX_SQLITE_HOME": str(codex_home),
+    }
+
+
+def create_agent_runner(
+    config: AgentConfig | None = None, *, codex_home: Path | None = None
+) -> AgentRunner:
     """Create the configured runner without leaking provider details to Agent.
 
     Codex is the only supported provider today. Keeping selection here makes
@@ -222,7 +237,10 @@ def create_agent_runner(config: AgentConfig | None = None) -> AgentRunner:
         reasoning_effort = (
             config.agent_reasoning_effort if config is not None else DEFAULT_AGENT_REASONING_EFFORT
         )
-        return CodexAgentRunner(model=model, reasoning_effort=reasoning_effort)
+        environment = agent_codex_environment(codex_home) if codex_home is not None else None
+        return CodexAgentRunner(
+            tool=CodexTool(environment=environment, model=model, reasoning_effort=reasoning_effort)
+        )
     raise AgentConfigError(f"Unsupported Agent provider: {provider}")
 
 

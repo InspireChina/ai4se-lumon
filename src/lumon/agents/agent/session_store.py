@@ -129,7 +129,9 @@ class AgentSessionStore:
             ).fetchone()
         return _session_from_row(row) if row is not None else None
 
-    def bind_agent_session(self, session_id: str, agent_session_id: str) -> None:
+    def bind_agent_session(
+        self, session_id: str, agent_session_id: str, *, codex_home: Path | None = None
+    ) -> None:
         """Persist the provider-native session used by one Lumon Session."""
 
         normalized = agent_session_id.strip()
@@ -139,10 +141,15 @@ class AgentSessionStore:
             connection.execute(
                 """
                 UPDATE sessions
-                SET agent_session_id = ?, last_activity_at = ?
+                SET agent_session_id = ?, agent_session_home = ?, last_activity_at = ?
                 WHERE session_id = ?
                 """,
-                (normalized, _timestamp(self._now()), session_id),
+                (
+                    normalized,
+                    str(codex_home) if codex_home else None,
+                    _timestamp(self._now()),
+                    session_id,
+                ),
             )
 
     def clear_agent_session(self, session_id: str) -> None:
@@ -152,7 +159,7 @@ class AgentSessionStore:
             connection.execute(
                 """
                 UPDATE sessions
-                SET agent_session_id = NULL, last_activity_at = ?
+                SET agent_session_id = NULL, agent_session_home = NULL, last_activity_at = ?
                 WHERE session_id = ?
                 """,
                 (_timestamp(self._now()), session_id),
@@ -720,6 +727,7 @@ class AgentSessionStore:
                         root_id TEXT,
                         workspace_id TEXT,
                         agent_session_id TEXT,
+                        agent_session_home TEXT,
                         created_at TEXT NOT NULL,
                         last_activity_at TEXT NOT NULL,
                         status TEXT NOT NULL
@@ -773,6 +781,7 @@ class AgentSessionStore:
                 _ensure_column(connection, "events", "workspace_id", "TEXT")
                 _ensure_column(connection, "events", "session_id", "TEXT")
                 _ensure_column(connection, "sessions", "agent_session_id", "TEXT")
+                _ensure_column(connection, "sessions", "agent_session_home", "TEXT")
                 _ensure_column(connection, "sessions", "write_control_event_id", "TEXT")
                 _ensure_column(
                     connection, "sessions", "writes_paused", "INTEGER NOT NULL DEFAULT 0"
@@ -865,6 +874,7 @@ def _session_from_row(row: sqlite3.Row) -> AgentSession:
         created_at=str(row["created_at"]),
         last_activity_at=str(row["last_activity_at"]),
         status=str(row["status"]),
+        agent_session_home=str(row["agent_session_home"]) if row["agent_session_home"] else None,
     )
 
 

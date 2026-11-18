@@ -136,6 +136,7 @@ class CodexTool:
                 [self.executable, "login", "status"],
                 check=False,
                 capture_output=True,
+                env=self.environment,
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):

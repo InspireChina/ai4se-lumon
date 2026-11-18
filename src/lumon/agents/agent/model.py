@@ -212,6 +212,7 @@ class AgentSession:
     created_at: str
     last_activity_at: str
     status: str = "active"
+    agent_session_home: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

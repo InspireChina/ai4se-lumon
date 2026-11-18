@@ -56,7 +56,8 @@ def test_agent_doctor_reports_the_configured_model_and_effort(
         )
     )
 
-    def unavailable_runner(_config: AgentConfig | None) -> AgentRunner:
+    def unavailable_runner(_config: AgentConfig | None, *, codex_home: Path) -> AgentRunner:
+        assert codex_home == state_root / "codex-agent"
         return CodexAgentRunner(tool=CodexTool(binary=str(tmp_path / "missing-codex")))
 
     monkeypatch.setattr(agent_commands, "create_agent_runner", unavailable_runner)
@@ -84,7 +85,8 @@ def test_agent_doctor_reports_langfuse_cloud_without_exposing_credentials(
         )
     )
 
-    def unavailable_runner(_config: AgentConfig | None) -> AgentRunner:
+    def unavailable_runner(_config: AgentConfig | None, *, codex_home: Path) -> AgentRunner:
+        assert codex_home == state_root / "codex-agent"
         return CodexAgentRunner(tool=CodexTool(binary=str(tmp_path / "missing-codex")))
 
     monkeypatch.setattr(agent_commands, "create_agent_runner", unavailable_runner)
@@ -112,6 +114,45 @@ def test_agent_status_json_reports_stopped_without_creating_a_process(
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)["status"] == "stopped"
+
+
+def test_agent_requires_sign_in_to_its_own_codex_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "lumon"
+    desktop_home = tmp_path / "desktop"
+    desktop_home.mkdir()
+    (desktop_home / "logged-in").touch()
+    monkeypatch.setenv("LUMON_HOME", str(state_root))
+    monkeypatch.setenv("CODEX_HOME", str(desktop_home))
+    monkeypatch.setenv("CODEX_SQLITE_HOME", str(desktop_home))
+    store = AgentConfigStore(state_root)
+    store.save(AgentConfig(enabled=True, feishu_app_id="cli_test", feishu_app_secret="test"))
+    binary = tmp_path / "fake-codex"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'test "$CODEX_HOME" = "$CODEX_SQLITE_HOME" || exit 2\n'
+        'if test "$2" = status; then test -f "$CODEX_HOME/logged-in"; exit; fi\n'
+        'touch "$CODEX_HOME/logged-in"\n'
+    )
+    binary.chmod(0o700)
+    monkeypatch.setattr(agent_commands, "resolve_codex_binary", lambda: str(binary))
+    monkeypatch.setattr("lumon.tools.codex.resolve_codex_binary", lambda: str(binary))
+    cli = CliRunner()
+    start = cli.invoke(app, ["agent", "start", "--background"])
+    assert start.exit_code == 3
+    assert "lumon agent codex-login" in start.output
+
+    login = cli.invoke(app, ["agent", "codex-login"])
+
+    assert login.exit_code == 0, login.output
+    assert (store.codex_home / "logged-in").is_file()
+    assert store.codex_home.stat().st_mode & 0o777 == 0o700
+    report = cli.invoke(app, ["agent", "doctor", "--json"])
+    check = next(c for c in json.loads(report.stdout)["checks"] if c["name"] == "agent_login")
+    assert check["ok"] is True
+    assert str(store.codex_home) in check["detail"]
+    assert set(desktop_home.iterdir()) == {desktop_home / "logged-in"}
 
 
 def test_agent_status_reads_legacy_runtime_pid_file(

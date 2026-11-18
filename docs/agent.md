@@ -276,6 +276,20 @@ Lumon 只读取现有覆盖文件，不会自动覆盖或升级它。为兼容�
 
 ## 运行与检查
 
+飞书 Agent 使用 `$LUMON_HOME/codex-agent` 保存 Codex 登录状态、对话和索引，
+默认位置为 `~/.lumon/codex-agent`。首次启动前登录该环境：
+
+```text
+lumon agent codex-login
+```
+
+旧对话第一次续聊时，从 Lumon 已保存的近期飞书消息恢复上下文，并在专用环境中建立新对话。
+桌面端仍可查看原先保存在桌面端的记录。新对话可以在飞书中继续。
+
+工作区 GitHub MCP、工作区 Skills 开关和 `~/.agents/skills` 仍适用。飞书 Agent
+专用的 MCP 和 Codex 用户设置存放在该环境的 `config.toml`。将需要的用户级 Skills
+放在专用目录的 `skills/` 下，并保留默认的 SQLite 位置。
+
 建议先检查：
 
 ```text
@@ -317,6 +331,7 @@ Agent 当前使用 `full_access` 的 Agent 执行模式，具体由 Codex runner
 
 ```text
 lumon agent configure
+lumon agent codex-login
 lumon agent doctor
 lumon agent start
 ```

@@ -23,11 +23,12 @@ from lumon.agents.agent.config import (
     AgentConfigStore,
     ObservabilityConfig,
 )
-from lumon.agents.agent.runner import create_agent_runner
+from lumon.agents.agent.runner import agent_codex_environment, create_agent_runner
 from lumon.agents.agent.service import AgentService
 from lumon.agents.agent.session_store import resolve_database_path
 from lumon.agents.agent.workspace_context import WorkspaceContextBuilder
 from lumon.errors import AgentConfigError, AgentRuntimeError, LumonError
+from lumon.tools.codex import resolve_codex_binary
 from lumon.workspace.registry import UserStateLayout, WorkspaceRegistry
 
 agent_app = typer.Typer(
@@ -124,6 +125,8 @@ def start(
     """Start Agent's Feishu WebSocket listener."""
 
     try:
+        if not child:
+            _require_agent_login()
         if background and not child:
             _start_background()
             return
@@ -137,6 +140,23 @@ def start(
     except LumonError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=exc.exit_code) from exc
+
+
+@agent_app.command("codex-login")
+def codex_login() -> None:
+    """Sign in to Codex for the Feishu Agent."""
+
+    codex_home = AgentConfigStore().codex_home
+    try:
+        environment = agent_codex_environment(codex_home)
+        codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
+        codex_home.chmod(0o700)
+        result = subprocess.run([resolve_codex_binary(), "login"], env=environment, check=False)
+    except (OSError, AgentConfigError) as exc:
+        typer.echo(f"Unable to start Codex sign-in for Agent at {codex_home}.", err=True)
+        raise typer.Exit(code=3) from exc
+    if result.returncode:
+        raise typer.Exit(code=result.returncode)
 
 
 @agent_app.command("status")
@@ -223,7 +243,7 @@ def _inspect_agent() -> AgentDoctorReport:
     )
 
     try:
-        runner = create_agent_runner(config)
+        runner = create_agent_runner(config, codex_home=store.codex_home)
     except AgentConfigError as exc:
         checks.append(AgentDoctorCheck("agent_cli", False, str(exc)))
         checks.append(
@@ -246,9 +266,9 @@ def _inspect_agent() -> AgentDoctorReport:
                 AgentDoctorCheck(
                     "agent_login",
                     login_ok,
-                    f"{runner.display_name} session is ready"
+                    f"{runner.display_name} session is ready at {store.codex_home}"
                     if login_ok
-                    else f"{runner.display_name} login is unavailable",
+                    else f"Sign in at {store.codex_home} with `lumon agent codex-login`.",
                 )
             )
         else:
@@ -288,6 +308,18 @@ def _inspect_agent() -> AgentDoctorReport:
         )
     )
     return AgentDoctorReport(tuple(checks))
+
+
+def _require_agent_login() -> None:
+    store = AgentConfigStore()
+    config = store.load()
+    if not config.enabled:
+        raise AgentConfigError("Agent is disabled. Enable it with `lumon agent configure`.")
+    runner = create_agent_runner(config, codex_home=store.codex_home)
+    if not runner.is_available():
+        raise AgentConfigError(f"{runner.display_name} CLI not found: {runner.executable}")
+    if not runner.is_authenticated():
+        raise AgentConfigError("Sign in to the Agent profile with `lumon agent codex-login`.")
 
 
 def _observability_checks(config: AgentConfig) -> list[AgentDoctorCheck]:
