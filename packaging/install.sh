@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly DEFAULT_REPOSITORY="zchengb/lumon"
+readonly DEFAULT_REPOSITORY="InspireChina/ai4se-lumon"
 readonly DEFAULT_VERSION="latest"
 
 repository="${LUMON_REPOSITORY:-$DEFAULT_REPOSITORY}"
@@ -26,7 +26,7 @@ environment, and pip. For a private GitHub repository, it first tries the
 Release API with LUMON_GITHUB_TOKEN and then falls back to Git over SSH.
 
 Options:
-  --repository OWNER/REPOSITORY  GitHub repository (default: zchengb/lumon)
+  --repository OWNER/REPOSITORY  GitHub repository (default: InspireChina/ai4se-lumon)
   --version latest|vX.Y.Z        Release tag (default: latest stable Release)
   --install-root PATH            Installation directory
   --bin-dir PATH                 Directory for the lumon executable

@@ -16,8 +16,19 @@ from lumon.update import (
     UpdateRequest,
     UpdateService,
     UpdateStatus,
+    default_repository,
 )
 from lumon.version import __version__
+
+
+def test_default_repository_uses_organization_release_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LUMON_GITHUB_REPOSITORY", raising=False)
+    assert default_repository() == "InspireChina/ai4se-lumon"
+
+    monkeypatch.setenv("LUMON_GITHUB_REPOSITORY", "example/private-fork")
+    assert default_repository() == "example/private-fork"
 
 
 class FakeReleaseSource:
