@@ -244,7 +244,8 @@ it("opens a scheduled workflow, reloads its saved schedule on return, and isolat
     workflow_schedules: workspaceId === "workspace-one" ? [{ flow_id: flow.flow_id, name: flow.name, enabled: flow.schedule_enabled, schedule_expression: flow.schedule_expression }] : [],
   }));
   const flowRequest = vi.fn(async (path: string) => {
-    if (path.endsWith("/flows")) return new Response(JSON.stringify([flow]));
+    if (path === "/api/workspaces/workspace-one/flows") return new Response(JSON.stringify([flow]));
+    if (path === "/api/workspaces/workspace-two/flows") return new Response("[]");
     if (path === "/api/workspaces/workspace-one/flows/auto-guard") return new Response(JSON.stringify(flow));
     throw new Error(`Unexpected request: ${path}`);
   });
@@ -263,6 +264,7 @@ it("opens a scheduled workflow, reloads its saved schedule on return, and isolat
     expect(flowRequest).toHaveBeenCalledWith("/api/workspaces/workspace-one/flows/auto-guard", expect.any(Object));
     expect(container.querySelector(".flow-row.active strong")?.textContent).toBe("Auto Guard");
     expect(container.querySelector<HTMLInputElement>("#flow-schedule-expression")?.value).toBe("0 10 * * 1-5");
+    expect(container.querySelector(".flow-schedule-panel")?.closest("[hidden]")).toBeNull();
     expect(saveSchedule).not.toHaveBeenCalled();
     await act(async () => {
       const input = container.querySelector<HTMLInputElement>("#flow-schedule-expression")!;

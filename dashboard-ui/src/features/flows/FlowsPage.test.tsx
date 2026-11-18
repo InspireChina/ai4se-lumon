@@ -30,13 +30,13 @@ async function renderFlow(document: FlowDocument, locale: Locale = "en") {
   const onError = vi.fn();
   const onNotice = vi.fn();
   await act(async () => root.render(<I18nProvider><FlowsPage
-    workspaceId="workspace-one" initialDocumentId={document.flow_id}
+    workspaceId="workspace-one"
     onDirtyChange={onDirtyChange} onNotice={onNotice} onError={onError}
   /></I18nProvider>));
   return { container, root, onDirtyChange, onError, onNotice, requests };
 }
 
-it.each(["en", "zh-CN", "zh-TW"] as const)("keeps scheduling above the document and saves it independently in %s", async (locale) => {
+it.each(["en", "zh-CN", "zh-TW"] as const)("keeps the Schedule and Markdown tabs independent in %s", async (locale) => {
   const save = vi.spyOn(dashboardApi, "updateFlowSchedule").mockImplementation(async (_workspaceId, _flowId, enabled, expression) => (
     { ...flow, schedule_enabled: enabled, schedule_expression: expression }
   ));
@@ -48,9 +48,13 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("keeps scheduling above the document 
     const toggle = panel.querySelector<HTMLInputElement>('[role="switch"]')!;
     const saveSchedule = panel.querySelector<HTMLButtonElement>(".settings-actions button")!;
     const saveDocument = container.querySelector<HTMLButtonElement>(".flow-editor-actions .button-primary")!;
+    const [documentTab, markdownTab, scheduleTab] = container.querySelectorAll<HTMLButtonElement>(".flow-view-toggle button");
     expect(panel.closest(".flow-editor-panel")).not.toBeNull();
-    expect(panel.classList.contains("panel")).toBe(false);
-    expect(panel.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(panel.closest("[hidden]")).not.toBeNull();
+    expect(preview.textContent).toContain("Read-only review.");
+    await act(async () => scheduleTab.click());
+    expect(panel.closest("[hidden]")).toBeNull();
+    expect(container.querySelector(".flow-markdown-preview")).toBeNull();
     expect(panel.querySelector(".status-pill")).toBeNull();
     expect(panel.querySelector("#flow-schedule-help")).toBeNull();
     expect(panel.querySelectorAll(".field-help")).toHaveLength(0);
@@ -67,13 +71,14 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("keeps scheduling above the document 
     expect(saveSchedule.disabled).toBe(false);
     expect(saveDocument.disabled).toBe(true);
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
-    await act(async () => container.querySelectorAll<HTMLButtonElement>(".flow-view-toggle button")[1].click());
+    await act(async () => markdownTab.click());
     expect(container.querySelector(".flow-editor")).not.toBeNull();
     expect(input.value).toBe("0 11 * * 1-5");
-    await act(async () => container.querySelectorAll<HTMLButtonElement>(".flow-view-toggle button")[0].click());
+    await act(async () => documentTab.click());
     expect(input.value).toBe("0 11 * * 1-5");
     expect(save).not.toHaveBeenCalled();
 
+    await act(async () => scheduleTab.click());
     save.mockRejectedValueOnce(new Error("Schedule could not be saved."));
     await act(async () => saveSchedule.click());
     expect(onError).toHaveBeenCalledWith("Schedule could not be saved.");
@@ -91,16 +96,20 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("keeps scheduling above the document 
     await act(async () => saveSchedule.click());
     expect(save).toHaveBeenLastCalledWith("workspace-one", "auto-guard", false, "0 11 * * 1-5");
 
-    await act(async () => container.querySelectorAll<HTMLButtonElement>(".flow-view-toggle button")[1].click());
+    await act(async () => markdownTab.click());
     const editor = container.querySelector<HTMLTextAreaElement>(".flow-editor")!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(editor, "# Updated plan");
       editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => scheduleTab.click());
+    await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "0 12 * * 1-5");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await act(async () => saveSchedule.click());
-    expect(editor.value).toBe("# Updated plan");
+    await act(async () => markdownTab.click());
+    expect(container.querySelector<HTMLTextAreaElement>(".flow-editor")?.value).toBe("# Updated plan");
     expect(saveDocument.disabled).toBe(false);
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
     expect(requests).toHaveBeenCalledTimes(2);
@@ -155,7 +164,7 @@ it("does not run disabled or unsaved draft workflows", async () => {
     const button = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent === "Run now")!;
     expect(button.disabled).toBe(true);
     await act(async () => button.click());
-    await act(async () => container.querySelector<HTMLButtonElement>(".flows-list-actions button")!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".resource-page-heading .button-primary")!.click());
     expect(container.querySelector(".flow-schedule-panel")).toBeNull();
     expect(run).not.toHaveBeenCalled();
   } finally {

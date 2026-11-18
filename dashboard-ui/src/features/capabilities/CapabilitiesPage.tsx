@@ -1,4 +1,3 @@
-import { Puzzle } from "lucide-react";
 import { dashboardApi } from "../../app/api";
 import { useI18n } from "../../shared/i18n";
 import type { CapabilityDocument, CapabilitySummary } from "../../shared/types";
@@ -53,10 +52,11 @@ const capabilityApi: MarkdownDocumentApi<CapabilitySummary, CapabilityDocument> 
   delete: dashboardApi.deleteCapability,
 };
 
+const getCapabilityId = (capability: CapabilitySummary) => capability.capability_id;
+
 export function CapabilitiesPage(props: CapabilitiesPageProps): React.JSX.Element {
   const { t } = useI18n();
   const labels: MarkdownDocumentLabels = {
-    eyebrow: t("capabilities.eyebrow"),
     title: t("capabilities.title"),
     subtitle: t("capabilities.subtitle"),
     unsaved: t("capabilities.unsaved"),
@@ -65,6 +65,10 @@ export function CapabilitiesPage(props: CapabilitiesPageProps): React.JSX.Elemen
     new: t("capabilities.new"),
     empty: t("capabilities.empty"),
     emptyHelp: t("capabilities.emptyHelp"),
+    search: t("resources.search"),
+    status: t("resources.status"),
+    all: t("resources.all"),
+    noMatches: t("resources.noMatches"),
     enabled: t("capabilities.enabled"),
     disabled: t("capabilities.disabled"),
     invalid: t("capabilities.invalid"),
@@ -89,12 +93,10 @@ export function CapabilitiesPage(props: CapabilitiesPageProps): React.JSX.Elemen
   return (
     <MarkdownDocumentsPage
       {...props}
-      icon={Puzzle}
-      iconTone="blue"
       labels={labels}
       starterContent={starterContent}
       api={capabilityApi}
-      getId={(document) => document.capability_id}
+      getId={getCapabilityId}
     />
   );
 }

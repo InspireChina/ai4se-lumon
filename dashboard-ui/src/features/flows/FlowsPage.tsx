@@ -1,5 +1,6 @@
-import { Clock3, GitBranch, LoaderCircle, Play, Save } from "lucide-react";
+import { LoaderCircle, Play, Save } from "lucide-react";
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { dashboardApi } from "../../app/api";
 import { useI18n } from "../../shared/i18n";
 import type { FlowDocument, FlowSummary } from "../../shared/types";
@@ -59,10 +60,11 @@ const flowApi: MarkdownDocumentApi<FlowSummary, FlowDocument> = {
   delete: dashboardApi.deleteFlow,
 };
 
+const getFlowId = (flow: FlowSummary) => flow.flow_id;
+
 export function FlowsPage(props: FlowsPageProps): React.JSX.Element {
   const { t } = useI18n();
   const labels: MarkdownDocumentLabels = {
-    eyebrow: t("flows.eyebrow"),
     title: t("flows.title"),
     subtitle: t("flows.subtitle"),
     unsaved: t("flows.unsaved"),
@@ -71,6 +73,10 @@ export function FlowsPage(props: FlowsPageProps): React.JSX.Element {
     new: t("flows.new"),
     empty: t("flows.empty"),
     emptyHelp: t("flows.emptyHelp"),
+    search: t("resources.search"),
+    status: t("resources.status"),
+    all: t("resources.all"),
+    noMatches: t("resources.noMatches"),
     enabled: t("flows.enabled"),
     disabled: t("flows.disabled"),
     invalid: t("flows.invalid"),
@@ -95,58 +101,56 @@ export function FlowsPage(props: FlowsPageProps): React.JSX.Element {
   return (
     <MarkdownDocumentsPage
       {...props}
-      icon={GitBranch}
       labels={labels}
       starterContent={starterContent}
       api={flowApi}
-      getId={(document) => document.flow_id}
-      renderDetails={(document, markDirty, executionBlocked) => (
-        <FlowSchedulePanel
-          key={document ? `${props.workspaceId}:${document.flow_id}:${document.enabled}:${document.schedule_enabled}:${document.schedule_expression}` : "none"}
-          workspaceId={props.workspaceId}
-          flow={document}
-          onDirtyChange={markDirty}
-          onNotice={props.onNotice}
-          onError={props.onError}
-          executionBlocked={executionBlocked}
-        />
-      )}
+      getId={getFlowId}
+      details={{
+        label: t("resources.schedule"),
+        render: (document, markDirty, executionBlocked, headerActions) => (
+          <FlowSchedulePanel
+            key={`${props.workspaceId}:${document.flow_id}:${document.enabled}:${document.schedule_enabled}:${document.schedule_expression}`}
+            workspaceId={props.workspaceId}
+            flow={document}
+            onDirtyChange={markDirty}
+            onNotice={props.onNotice}
+            onError={props.onError}
+            executionBlocked={executionBlocked}
+            headerActions={headerActions}
+          />
+        ),
+      }}
     />
   );
 }
 
 interface FlowSchedulePanelProps {
   workspaceId: string;
-  flow: FlowDocument | null;
+  flow: FlowDocument;
   onDirtyChange: (dirty: boolean) => void;
   onNotice: (message: string) => void;
   onError: (message: string) => void;
   executionBlocked: boolean;
+  headerActions: HTMLElement | null;
 }
 
 function FlowSchedulePanel({
   workspaceId,
-  flow,
+  flow: selectedFlow,
   onDirtyChange,
   onNotice,
   onError,
   executionBlocked,
-}: FlowSchedulePanelProps): React.JSX.Element | null {
+  headerActions,
+}: FlowSchedulePanelProps): React.JSX.Element {
   const { t } = useI18n();
-  const [enabled, setEnabled] = useState(flow?.schedule_enabled ?? false);
-  const [scheduleExpression, setScheduleExpression] = useState(
-    flow?.schedule_expression ?? "0 8 * * *",
-  );
-  const [savedEnabled, setSavedEnabled] = useState(flow?.schedule_enabled ?? false);
-  const [savedExpression, setSavedExpression] = useState(
-    flow?.schedule_expression ?? "0 8 * * *",
-  );
+  const [enabled, setEnabled] = useState(selectedFlow.schedule_enabled);
+  const [scheduleExpression, setScheduleExpression] = useState(selectedFlow.schedule_expression);
+  const [savedEnabled, setSavedEnabled] = useState(selectedFlow.schedule_enabled);
+  const [savedExpression, setSavedExpression] = useState(selectedFlow.schedule_expression);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const runPending = useRef(false);
-
-  if (!flow || !flow.valid) return null;
-  const selectedFlow = flow;
 
   const changed = enabled !== savedEnabled || scheduleExpression !== savedExpression;
 
@@ -189,19 +193,19 @@ function FlowSchedulePanel({
 
   return (
     <section className="flow-schedule-panel" aria-label={t("flows.scheduleTitle")}>
+      {headerActions && createPortal(
+        <button
+          className="button button-secondary"
+          type="button"
+          onClick={() => void runNow()}
+          disabled={running || saving || executionBlocked || !selectedFlow.enabled}
+        >
+          {running ? <LoaderCircle size={16} className="spin" /> : <Play size={16} />}
+          {t(running ? "flows.running" : "flows.runNow")}
+        </button>,
+        headerActions,
+      )}
       <div className="flow-schedule-heading">
-        <div className="flow-execution-actions">
-          <h3><Clock3 size={16} />{t("flows.scheduleTitle")}</h3>
-          <button
-            className="button button-secondary"
-            type="button"
-            onClick={() => void runNow()}
-            disabled={running || saving || executionBlocked || !selectedFlow.enabled}
-          >
-            {running ? <LoaderCircle size={16} className="spin" /> : <Play size={16} />}
-            {t(running ? "flows.running" : "flows.runNow")}
-          </button>
-        </div>
         <label className={`settings-toggle ${enabled ? "is-enabled" : ""}`}>
           <span>{t("flows.scheduleToggle")}</span>
           <input

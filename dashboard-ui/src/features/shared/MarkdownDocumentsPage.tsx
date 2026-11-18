@@ -1,17 +1,13 @@
 import {
   AlertTriangle,
-  Check,
-  Eye,
   FilePlus2,
   LoaderCircle,
-  PencilLine,
   Power,
   RefreshCw,
   Save,
   Trash2,
-  type LucideIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { MarkdownPreview } from "../flows/MarkdownPreview";
 
@@ -40,7 +36,6 @@ export interface MarkdownDocumentApi<
 }
 
 export interface MarkdownDocumentLabels {
-  eyebrow: string;
   title: string;
   subtitle: string;
   unsaved: string;
@@ -49,6 +44,10 @@ export interface MarkdownDocumentLabels {
   new: string;
   empty: string;
   emptyHelp: string;
+  search: string;
+  status: string;
+  all: string;
+  noMatches: string;
   enabled: string;
   disabled: string;
   invalid: string;
@@ -79,20 +78,22 @@ interface MarkdownDocumentsPageProps<
   onDirtyChange: (dirty: boolean) => void;
   onNotice: (message: string) => void;
   onError: (message: string) => void;
-  icon: LucideIcon;
-  iconTone?: "rose" | "blue";
   labels: MarkdownDocumentLabels;
   starterContent: string;
   api: MarkdownDocumentApi<TSummary, TDocument>;
   getId: (document: TSummary) => string;
-  renderDetails?: (
-    document: TDocument | null,
-    onDirtyChange: (dirty: boolean) => void,
-    executionBlocked: boolean,
-  ) => ReactNode;
+  details?: {
+    label: string;
+    render: (
+      document: TDocument,
+      onDirtyChange: (dirty: boolean) => void,
+      executionBlocked: boolean,
+      headerActions: HTMLElement | null,
+    ) => ReactNode;
+  };
 }
 
-type DocumentViewMode = "preview" | "edit";
+type DocumentViewMode = "preview" | "edit" | "details";
 
 export function MarkdownDocumentsPage<
   TSummary extends MarkdownDocumentSummary,
@@ -103,13 +104,11 @@ export function MarkdownDocumentsPage<
   onDirtyChange,
   onNotice,
   onError,
-  icon: DocumentIcon,
-  iconTone = "rose",
   labels,
   starterContent,
   api,
   getId,
-  renderDetails,
+  details,
 }: MarkdownDocumentsPageProps<TSummary, TDocument>): React.JSX.Element {
   const [documents, setDocuments] = useState<TSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -123,10 +122,17 @@ export function MarkdownDocumentsPage<
   const [viewMode, setViewMode] = useState<DocumentViewMode>("preview");
   const [detailsDirty, setDetailsDirty] = useState(false);
   const [detailsRevision, setDetailsRevision] = useState(0);
+  const [headerActions, setHeaderActions] = useState<HTMLDivElement | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
+  const selection = useRef(0);
+  const openDetails = Boolean(initialDocumentId && details);
 
   useEffect(() => {
     let cancelled = false;
+    const request = ++selection.current;
     setLoading(true);
+    setDocuments([]);
     setLoadingDocument(false);
     setDocument(null);
     setDraft(false);
@@ -135,21 +141,27 @@ export function MarkdownDocumentsPage<
     setViewMode("preview");
     setDetailsDirty(false);
     setDetailsRevision((revision) => revision + 1);
+    setSearch("");
+    setFilter("all");
     onDirtyChange(false);
     void api.list(workspaceId)
       .then(async (nextDocuments) => {
         if (cancelled) return;
         setDocuments(nextDocuments);
-        if (!initialDocumentId) return;
-        setSelectedId(initialDocumentId);
+        const first = nextDocuments[0];
+        const nextId = initialDocumentId ?? (first ? getId(first) : null);
+        if (!nextId || request !== selection.current) return;
+        setSelectedId(nextId);
         setLoadingDocument(true);
-        const selectedDocument = await api.get(workspaceId, initialDocumentId);
-        if (cancelled) return;
+        setLoading(false);
+        const selectedDocument = await api.get(workspaceId, nextId);
+        if (cancelled || request !== selection.current) return;
         setDocument(selectedDocument);
         setContent(selectedDocument.content);
+        if (openDetails && selectedDocument.valid) setViewMode("details");
       })
       .catch((reason: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && request === selection.current) {
           setSelectedId(null);
           onError(messageFor(reason, labels.loadFailed));
         }
@@ -157,18 +169,20 @@ export function MarkdownDocumentsPage<
       .finally(() => {
         if (!cancelled) {
           setLoading(false);
-          setLoadingDocument(false);
+          if (request === selection.current) setLoadingDocument(false);
         }
       });
     return () => {
       cancelled = true;
+      selection.current++;
     };
-  }, [api, initialDocumentId, labels.loadFailed, onDirtyChange, onError, workspaceId]);
+  }, [api, getId, initialDocumentId, labels.loadFailed, onDirtyChange, onError, openDetails, workspaceId]);
 
   async function selectDocument(summary: TSummary): Promise<void> {
     const nextId = getId(summary);
-    if (nextId === selectedId) return;
+    if (nextId === selectedId && (document || loadingDocument)) return;
     if (!confirmDiscard()) return;
+    const request = ++selection.current;
     setSelectedId(nextId);
     setDocument(null);
     setDraft(false);
@@ -180,17 +194,23 @@ export function MarkdownDocumentsPage<
     setLoadingDocument(true);
     try {
       const nextDocument = await api.get(workspaceId, nextId);
+      if (request !== selection.current) return;
       setDocument(nextDocument);
       setContent(nextDocument.content);
     } catch (reason) {
-      onError(messageFor(reason, labels.loadFailed));
+      if (request === selection.current) {
+        setSelectedId(null);
+        onError(messageFor(reason, labels.loadFailed));
+      }
     } finally {
-      setLoadingDocument(false);
+      if (request === selection.current) setLoadingDocument(false);
     }
   }
 
   async function createDocument(): Promise<void> {
     if (!confirmDiscard()) return;
+    selection.current++;
+    setLoadingDocument(false);
     setSelectedId(null);
     setDocument(null);
     setDraft(true);
@@ -215,6 +235,7 @@ export function MarkdownDocumentsPage<
       setDocument(saved);
       setDraft(false);
       setContent(saved.content);
+      if (!saved.valid && viewMode === "details") setViewMode("edit");
       setSelectedId(getId(saved));
       onDirtyChange(detailsDirty);
       await reloadDocuments(getId(saved));
@@ -308,42 +329,53 @@ export function MarkdownDocumentsPage<
 
   const contentDirty = draft || (document !== null && content !== document.content);
   const dirty = contentDirty || detailsDirty;
+  const query = search.trim().toLowerCase();
+  const visibleDocuments = documents.filter((summary) => (
+    (filter === "all" || (summary.valid && summary.enabled === (filter === "enabled")))
+    && [summary.name, summary.brief, summary.path].some((entry) => entry.toLowerCase().includes(query))
+  ));
+  const documentDetails = document?.valid ? details : undefined;
 
   return (
     <div className="page-stack">
-      <div className="page-heading">
+      <div className="page-heading resource-page-heading">
         <div>
-          <p className="eyebrow">{labels.eyebrow}</p>
           <h1>{labels.title}</h1>
           <p className="muted">{labels.subtitle}</p>
         </div>
-        {dirty && <span className="unsaved-label">{labels.unsaved}</span>}
+        <div className="resource-heading-actions">
+          {dirty && <span className="unsaved-label">{labels.unsaved}</span>}
+          <button className="button button-primary" type="button" onClick={() => void createDocument()} disabled={saving || deleting}>
+            <FilePlus2 size={15} />{labels.new}
+          </button>
+        </div>
       </div>
 
-      <div className="flows-layout">
-        <section className="panel flows-list-panel">
-          <div className="panel-heading flows-panel-heading">
-            <div className="settings-title">
-              <span className={`workspace-glyph glyph-${iconTone}`}><DocumentIcon size={18} /></span>
-              <div><p className="eyebrow">{labels.eyebrow}</p><h2>{labels.select}</h2></div>
+      <div className="panel flows-layout">
+        <section className="flows-list-panel" aria-label={labels.title}>
+          <div className="flow-catalog-tools">
+            <div className="flow-search-row">
+              <input type="search" className="text-input" value={search} placeholder={labels.search} aria-label={labels.search}
+                onChange={(event) => setSearch(event.target.value)} />
+              <button className="icon-button" type="button" onClick={() => void refresh()} disabled={loading} aria-label={labels.refresh} title={labels.refresh}>
+                <RefreshCw size={15} className={loading ? "spin" : ""} />
+              </button>
             </div>
-            <button className="icon-button" type="button" onClick={() => void refresh()} disabled={loading} aria-label={labels.refresh}>
-              <RefreshCw size={15} className={loading ? "spin" : ""} />
-            </button>
-          </div>
-          <div className="flows-list-actions">
-            <button className="button button-primary" type="button" onClick={() => void createDocument()} disabled={saving}>
-              {saving ? <LoaderCircle size={15} className="spin" /> : <FilePlus2 size={15} />}
-              {labels.new}
-            </button>
+            <select className="flow-status-filter" aria-label={labels.status} value={filter} onChange={(event) => setFilter(event.target.value)}>
+              <option value="all">{labels.all}</option>
+              <option value="enabled">{labels.enabled}</option>
+              <option value="disabled">{labels.disabled}</option>
+            </select>
           </div>
           {loading ? (
             <div className="loading-inline flows-loading"><LoaderCircle size={20} className="spin" />Loading…</div>
           ) : documents.length === 0 ? (
-            <div className="empty-inline"><DocumentIcon size={22} /><div><strong>{labels.empty}</strong><p>{labels.emptyHelp}</p></div></div>
+            <div className="flow-catalog-empty"><strong>{labels.empty}</strong><p>{labels.emptyHelp}</p></div>
+          ) : visibleDocuments.length === 0 ? (
+            <p className="flow-catalog-empty">{labels.noMatches}</p>
           ) : (
             <div className="flows-list">
-              {documents.map((summary) => {
+              {visibleDocuments.map((summary) => {
                 const id = getId(summary);
                 const statusLabel = !summary.valid
                   ? labels.invalid
@@ -355,11 +387,14 @@ export function MarkdownDocumentsPage<
                     className={"flow-row" + (id === selectedId ? " active" : "")}
                     type="button"
                     key={summary.path + ":" + id}
+                    aria-current={id === selectedId ? "true" : undefined}
+                    disabled={saving || deleting}
                     onClick={() => void selectDocument(summary)}
                   >
-                    <span className={`workspace-glyph glyph-${summary.valid ? iconTone : "amber"}`}>{summary.valid ? <DocumentIcon size={18} /> : <AlertTriangle size={18} />}</span>
-                    <span className="flow-row-copy"><strong>{summary.name || id}</strong><small>{summary.path}</small>{!summary.valid && <em>{summary.error ?? labels.invalid}</em>}</span>
-                    <span className={summary.valid && summary.enabled ? "status-pill status-ready" : "status-pill status-neutral"}>{summary.valid && summary.enabled ? <><Check size={12} />{statusLabel}</> : statusLabel}</span>
+                    <span className="flow-row-copy"><strong>{summary.name || id}</strong><small>{summary.brief || summary.path}</small>{!summary.valid && <em>{summary.error ?? labels.invalid}</em>}</span>
+                    <span className="flow-status-dot" data-status={!summary.valid ? "invalid" : summary.enabled ? "enabled" : "disabled"} title={statusLabel}>
+                      <span className="sr-only">{statusLabel}</span>
+                    </span>
                   </button>
                 );
               })}
@@ -367,29 +402,34 @@ export function MarkdownDocumentsPage<
           )}
         </section>
 
-        <section className="panel flow-editor-panel">
-          <div className="panel-heading flow-editor-heading">
-            <div><p className="eyebrow">{labels.content}</p><h2>{document?.name ?? (draft ? labels.new : labels.select)}</h2></div>
+        <section className="flow-editor-panel">
+          <div className="flow-editor-heading">
+            <div>
+              <h2>{document?.name ?? (draft ? labels.new : labels.select)}</h2>
+              {document && <div className="mono flow-editor-path">{document.path}</div>}
+            </div>
             {document && (
-              <div className="flow-editor-heading-actions">
-                <span className="mono flow-editor-path">{document.path}</span>
-                <div className="segmented-control flow-view-toggle" role="group" aria-label={labels.viewMode}>
-                  <button className={viewMode === "preview" ? "active" : ""} type="button" aria-pressed={viewMode === "preview"} onClick={() => setViewMode("preview")}>
-                    <Eye size={14} />{labels.preview}
-                  </button>
-                  <button className={viewMode === "edit" ? "active" : ""} type="button" aria-pressed={viewMode === "edit"} onClick={() => setViewMode("edit")}>
-                    <PencilLine size={14} />{labels.edit}
-                  </button>
-                </div>
+              <div className="resource-heading-actions">
+                <span className={document.valid && document.enabled ? "status-pill status-ready" : "status-pill status-neutral"}>
+                  {!document.valid ? labels.invalid : document.enabled ? labels.enabled : labels.disabled}
+                </span>
+                {documentDetails && <div ref={setHeaderActions} />}
               </div>
             )}
           </div>
-          {renderDetails && (
-            <div key={detailsRevision}>
-              {renderDetails(document, (value) => {
+          {document && (
+            <div className="flow-view-toggle" role="group" aria-label={labels.viewMode}>
+              <button type="button" aria-pressed={viewMode === "preview"} onClick={() => setViewMode("preview")}>{labels.preview}</button>
+              <button type="button" aria-pressed={viewMode === "edit"} onClick={() => setViewMode("edit")}>{labels.edit}</button>
+              {documentDetails && <button type="button" aria-pressed={viewMode === "details"} onClick={() => setViewMode("details")}>{documentDetails.label}</button>}
+            </div>
+          )}
+          {document && documentDetails && (
+            <div key={detailsRevision} hidden={viewMode !== "details"}>
+              {documentDetails.render(document, (value) => {
                 setDetailsDirty(value);
                 onDirtyChange(value || contentDirty);
-              }, Boolean(contentDirty || saving || deleting))}
+              }, contentDirty || saving || deleting, headerActions)}
             </div>
           )}
           {loadingDocument ? (
@@ -398,7 +438,7 @@ export function MarkdownDocumentsPage<
             <>
               {viewMode === "preview" ? (
                 <MarkdownPreview content={content} metadataLabel={labels.metadata} />
-              ) : (
+              ) : viewMode === "edit" && (
                 <textarea
                   className="flow-editor"
                   value={content}
@@ -431,7 +471,7 @@ export function MarkdownDocumentsPage<
               </div>
             </>
           ) : (
-            <div className="empty-inline flow-editor-empty"><span className={`workspace-glyph glyph-${iconTone}`}><DocumentIcon size={22} /></span><div><strong>{labels.select}</strong><p>{labels.idHelp}</p></div></div>
+            <div className="flow-editor-empty muted">{labels.idHelp}</div>
           )}
         </section>
       </div>

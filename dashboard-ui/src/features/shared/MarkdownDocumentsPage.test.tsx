@@ -1,6 +1,5 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Puzzle } from "lucide-react";
 import { describe, expect, it, vi } from "vitest";
 import {
   MarkdownDocumentsPage,
@@ -18,7 +17,6 @@ interface TestDocument extends TestSummary {
 }
 
 const labels: MarkdownDocumentLabels = {
-  eyebrow: "Documents",
   title: "Documents",
   subtitle: "Manage documents.",
   unsaved: "Unsaved",
@@ -27,6 +25,10 @@ const labels: MarkdownDocumentLabels = {
   new: "New document",
   empty: "No documents",
   emptyHelp: "Create one.",
+  search: "Search documents",
+  status: "Status",
+  all: "All statuses",
+  noMatches: "No matching documents",
   enabled: "Enabled",
   disabled: "Disabled",
   invalid: "Invalid",
@@ -49,6 +51,7 @@ const labels: MarkdownDocumentLabels = {
 };
 
 const starterContent = '---\nid = "my-capability"\n---\n\n# Draft';
+const getId = (item: TestSummary) => item.id;
 
 function createDocumentApi(): MarkdownDocumentApi<TestSummary, TestDocument> {
   const document: TestDocument = {
@@ -90,7 +93,7 @@ describe("MarkdownDocumentsPage", () => {
     try {
       await act(async () => root.render(<MarkdownDocumentsPage
         workspaceId="workspace-1" initialDocumentId="my-capability" onDirtyChange={vi.fn()} onNotice={vi.fn()} onError={onError}
-        icon={Puzzle} labels={labels} starterContent={starterContent} api={api} getId={(item) => item.id}
+        labels={labels} starterContent={starterContent} api={api} getId={getId}
       />));
       expect(onError).toHaveBeenCalledWith("Workflow no longer exists");
       expect(container.querySelector(".flow-row.active")).toBeNull();
@@ -105,20 +108,55 @@ describe("MarkdownDocumentsPage", () => {
   it("ignores an initial workflow load after switching to another workspace", async () => {
     const api = createDocumentApi();
     const savedDocument = await api.get("workspace-1", "my-capability");
-    vi.mocked(api.list).mockResolvedValue([savedDocument]);
+    const otherDocument = { ...savedDocument, id: "other-capability", name: "Other capability" };
+    vi.mocked(api.list).mockResolvedValueOnce([savedDocument]).mockResolvedValueOnce([otherDocument]);
     let finishLoad!: (document: TestDocument) => void;
-    vi.mocked(api.get).mockImplementationOnce(() => new Promise((resolve) => { finishLoad = resolve; }));
+    vi.mocked(api.get)
+      .mockImplementationOnce(() => new Promise((resolve) => { finishLoad = resolve; }))
+      .mockResolvedValueOnce(otherDocument);
     const container = document.createElement("div");
     const root = createRoot(container);
-    const props = { onDirtyChange: vi.fn(), onNotice: vi.fn(), onError: vi.fn(), icon: Puzzle, labels, starterContent, api, getId: (item: TestSummary) => item.id };
+    const props = { onDirtyChange: vi.fn(), onNotice: vi.fn(), onError: vi.fn(), labels, starterContent, api, getId };
     try {
       await act(async () => root.render(<MarkdownDocumentsPage {...props} workspaceId="workspace-1" initialDocumentId="my-capability" />));
       expect(api.get).toHaveBeenLastCalledWith("workspace-1", "my-capability");
       await act(async () => root.render(<MarkdownDocumentsPage {...props} workspaceId="workspace-2" />));
       await act(async () => finishLoad(savedDocument));
-      expect(container.querySelector(".flow-editor-heading h2")?.textContent).toBe(labels.select);
-      expect(container.querySelector(".flow-row.active")).toBeNull();
+      expect(api.get).toHaveBeenLastCalledWith("workspace-2", "other-capability");
+      expect(container.querySelector(".flow-editor-heading h2")?.textContent).toBe("Other capability");
+      expect(container.querySelector(".flow-row[aria-current='true'] svg")).toBeNull();
       expect(props.onError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("filters the catalog without replacing the open document", async () => {
+    const api = createDocumentApi();
+    const first = await api.get("workspace-1", "my-capability");
+    const second = { ...first, id: "another", name: "Another", brief: "Build support", enabled: false };
+    vi.mocked(api.list).mockResolvedValue([first, second]);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MarkdownDocumentsPage
+        workspaceId="workspace-1" onDirtyChange={vi.fn()} onNotice={vi.fn()} onError={vi.fn()}
+        labels={labels} starterContent={starterContent} api={api} getId={getId}
+      />));
+      expect(container.querySelectorAll(".flow-row")).toHaveLength(2);
+      const select = container.querySelector("select")!;
+      await act(async () => {
+        select.value = "disabled";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(container.querySelector(".flow-row strong")?.textContent).toBe("Another");
+      const search = container.querySelector<HTMLInputElement>('input[type="search"]')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "unknown");
+        search.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(container.querySelector(".flow-catalog-empty")?.textContent).toBe(labels.noMatches);
+      expect(container.querySelector(".flow-editor-heading h2")?.textContent).toBe(first.name);
     } finally {
       await act(async () => root.unmount());
     }
@@ -137,11 +175,10 @@ describe("MarkdownDocumentsPage", () => {
             onDirtyChange={vi.fn()}
             onNotice={vi.fn()}
             onError={vi.fn()}
-            icon={Puzzle}
             labels={labels}
             starterContent={starterContent}
             api={api}
-            getId={(item) => item.id}
+            getId={getId}
           />,
         );
       });
