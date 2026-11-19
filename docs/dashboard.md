@@ -412,12 +412,13 @@ the execution prompt therefore forbids the Agent from moving a card back to entr
 conditions to authorize its own retry. Fully daemonized/reparented or remote jobs
 need explicit capability cleanup; Stop does not undo external effects.
 
-The packaged execution prompt now allows only ONE final successful Jira result
-comment per logical Delivery, not one per attempt. Blocked, failed, stopped and
-rework outcomes are kept locally. The Agent reconciles the stable run marker and
-saved comment ID before creating/updating, embeds final media, and reads back the
-result. This is an Agent workflow contract, not a security sandbox preventing raw
-Jira writes; an ambiguous write must be reconciled rather than blindly retried.
+The Agent writes one final Jira result comment per successful Delivery. Blocked,
+failed, stopped and rework outcomes stay in the local receipt. The Agent uses TWG
+to query and create the comment, or update the verified result for the same run.
+It checks the stable marker and saved comment ID before each write. If native media
+requires the Jira editor, the Agent edits the same comment there. It confirms the
+final comment and any embedded media before calling `lumon delivery complete`.
+The Agent reconciles ambiguous writes before retrying.
 
 An empty check records an idle poll and makes no Delivery changes. Incomplete,
 denied, invalid or timed-out searches record failure, never idle, and never fall

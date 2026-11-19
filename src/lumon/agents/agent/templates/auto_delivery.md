@@ -128,21 +128,29 @@ already-performed external actions. No credentials, raw logs or personal data.
 
 Only after implementation, required verification, configured publication and Jira
 status read-back have all succeeded, maintain ONE concise result comment for this
-logical Delivery. First read the receipt's result_comment_id and existing Jira
-comments. Reuse/update the existing result comment for this run (including an older
-blocked-result comment); never replace a human discussion or Technical Plan.
+logical Delivery. Use the authenticated local TWG CLI on the selected card and site.
+First read the receipt's result_comment_id and query the existing comments with
+`twg jira workitem comment query --issue-id <Story-key> --site $jira_site`.
+Check all relevant pages before deciding no result comment exists. Reuse the verified
+result comment for this run (including an older blocked-result comment). Never
+replace a human discussion or Technical Plan.
 Use the stable marker `Lumon Delivery: delivery-<Story-key>` to reconcile ambiguous
 network outcomes. If a write times out, read/reconcile before any retry; do NOT
 blindly create another comment. If identity is ambiguous, block reporting locally.
 
+Create a new result only through `twg jira workitem comment create --issue-id
+<Story-key> --site $jira_site --body-format markdown --body <body>`. Update the
+verified existing result with `twg jira workitem comment update --issue-id
+<Story-key> --id <comment-id> --site $jira_site --body-format markdown --body <body>`
+when the CLI can preserve the required content.
 Keep the comment to: delivered behavior, concise verification, published revision,
 and explicit coverage limits (Mock vs real service, platform, no production deployment).
-For UI work embed one short workflow video and 1-3 final key screenshots IN the
-comment, not just filenames/attachment links. Use matching Jira capabilities and
-native rich-content/browser upload support; read back rendered media before claiming
-it is embedded. Never publish obsolete/intermediate evidence as the final result.
-After a confirmed create/update, immediately save its numeric ID with
+After verifying the comment exists with the expected marker and numeric ID, save it with
 `lumon delivery checkpoint --run-id <story-run-id> --detail <handoff>
---result-comment-id <id>`. Only then call `complete`. If media/comment write-back
-fails, preserve the checkpoint and block the missing handoff; do not redo successful
-implementation or publication on continuation. No additional result comments.
+--result-comment-id <id>` before any further edits. For UI work embed one short
+workflow video and 1-3 final key screenshots IN that comment. Use the authorized
+Jira editor to edit that same comment when TWG cannot embed or preserve native media.
+Read back the final comment with TWG and verify rendered media before calling `complete`.
+Never publish obsolete or intermediate evidence. If media or comment write-back fails,
+preserve the checkpoint and block the missing handoff. On continuation, resume the handoff
+without redoing successful implementation or publication. No additional result comments.
