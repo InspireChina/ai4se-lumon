@@ -266,7 +266,7 @@ async def _read_thread(
     ]
     if not delivered:
         return _unavailable("email_thread", subject), []
-    message_bodies = [_mail_body(item) for item in delivered]
+    message_bodies = _mail_bodies(delivered)
     complete = all("body_plain_text" in body for body in message_bodies)
     source: dict[str, object] = {
         "kind": "email_thread",
@@ -362,6 +362,25 @@ async def _attachment_urls(
         _string(item.get("attachment_id")): _string(item.get("download_url"))
         for item in _objects(result.get("download_urls"))
     }
+
+
+def _mail_bodies(messages: list[Mapping[str, object]]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    earlier_bodies: list[tuple[int, str]] = []
+    for number, message in enumerate(messages, start=1):
+        record = _mail_body(message)
+        records.append(record)
+        body = record.get("body_plain_text")
+        if not isinstance(body, str) or len(body) < 512:
+            continue
+        # An exact suffix can be restored from the earlier message without sending it twice.
+        for prior_number, prior_body in reversed(earlier_bodies):
+            if body.endswith(prior_body):
+                record["body_plain_text"] = body[: -len(prior_body)]
+                record["quoted_suffix_from_message"] = prior_number
+                break
+        earlier_bodies.append((number, body))
+    return records
 
 
 def _mail_body(message: Mapping[str, object]) -> dict[str, object]:

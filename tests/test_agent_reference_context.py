@@ -278,6 +278,52 @@ def test_reads_attachments_from_every_delivered_message_and_reports_gaps(
     assert "code=secret" not in result.text
 
 
+def test_repeated_quoted_bodies_leave_room_for_attachments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("lumon.agents.agent.reference_context._MAX_SOURCE_LENGTH", 1600)
+    earlier = "Earlier message: " + "a" * 700
+    reply = "Reply: new decision\n\n" + earlier
+    csv = "header\n" + "x" * 280
+    response = {
+        "+get-user": {"user": {"open_id": _MESSAGE.sender_id}},
+        "+triage": {"has_more": False, "messages": [{**_MATCH, "thread_id": "thread-1"}]},
+        "+thread": {
+            "message_count": 2,
+            "messages": [
+                {"message_id": "mail-1", "body_plain_text": earlier},
+                {
+                    "message_id": "mail-2",
+                    "body_plain_text": reply,
+                    "attachments": [{"id": "report", "filename": "report.csv"}],
+                },
+            ],
+        },
+        "user_mailbox.message.attachments": {
+            "download_urls": [
+                {"attachment_id": "report", "download_url": "https://example.test/csv"}
+            ]
+        },
+    }
+
+    def read(*args: str) -> Mapping[str, object]:
+        return response[args[1]]
+
+    def download(_url: str, _limit: int) -> bytes:
+        return csv.encode()
+
+    result = asyncio.run(
+        read_reference_context(_MESSAGE, image_directory=tmp_path, read=read, download=download)
+    )
+
+    thread, attachment = json.loads(result.text.splitlines()[1])["sources"]
+    assert thread["status"] == attachment["status"] == "complete"
+    first, second = thread["messages"]
+    assert second["quoted_suffix_from_message"] == 1
+    assert second["body_plain_text"] + first["body_plain_text"] == reply
+    assert attachment["content"] == csv
+
+
 @pytest.mark.parametrize(
     "url",
     [
