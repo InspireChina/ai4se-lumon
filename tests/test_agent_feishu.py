@@ -393,6 +393,23 @@ def test_regular_text_with_card_payload_is_not_deferred() -> None:
     assert not message.card_only
 
 
+def test_document_card_preserves_original_link_without_the_preview_anchor() -> None:
+    message = normalize_message(
+        {
+            **_raw("p2p", "[interactive]"),
+            "content": SimpleNamespace(
+                card={
+                    "header": {"title": {"tag": "plain_text", "content": "Deployment document"}},
+                    "card_link": {"url": "https://example.feishu.cn/docx/Test123#share-section"},
+                },
+            ),
+        }
+    )
+    assert message is not None
+    assert message.card_only
+    assert message.text == "Deployment document\nhttps://example.feishu.cn/docx/Test123"
+
+
 def test_group_reply_creates_a_thread_for_a_top_level_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

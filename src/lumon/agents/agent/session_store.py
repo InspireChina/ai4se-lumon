@@ -177,9 +177,9 @@ class AgentSessionStore:
                 """
                 INSERT OR IGNORE INTO events (
                     event_id, message_id, session_id, conversation_key, chat_id,
-                    chat_type, thread_id, root_id, text, sender_id, sender_type,
+                    chat_type, thread_id, root_id, text, sender_id, sender_type, sender_union_id,
                     received_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
                 """,
                 (
                     event_id,
@@ -193,6 +193,7 @@ class AgentSessionStore:
                     sanitize_output(item.text),
                     item.sender_id,
                     item.sender_type,
+                    item.sender_union_id,
                     _timestamp(self._now()),
                 ),
             )
@@ -213,7 +214,7 @@ class AgentSessionStore:
             rows = connection.execute(
                 """
                 SELECT event_id, message_id, chat_id, chat_type, text, sender_id,
-                       sender_type, thread_id, root_id
+                       sender_type, sender_union_id, thread_id, root_id
                 FROM events
                 WHERE conversation_key = ? AND status = 'deferred'
                 ORDER BY received_at ASC
@@ -674,7 +675,7 @@ class AgentSessionStore:
             rows = connection.execute(
                 """
                 SELECT event_id, message_id, chat_id, chat_type, text, sender_id,
-                       sender_type, thread_id, root_id
+                       sender_type, sender_union_id, thread_id, root_id
                 FROM events
                 WHERE status = 'queued'
                 ORDER BY received_at ASC
@@ -745,6 +746,7 @@ class AgentSessionStore:
                         text TEXT NOT NULL,
                         sender_id TEXT NOT NULL,
                         sender_type TEXT NOT NULL,
+                        sender_union_id TEXT,
                         received_at TEXT NOT NULL,
                         status TEXT NOT NULL
                     );
@@ -783,6 +785,7 @@ class AgentSessionStore:
                 _ensure_column(connection, "sessions", "agent_session_id", "TEXT")
                 _ensure_column(connection, "sessions", "agent_session_home", "TEXT")
                 _ensure_column(connection, "sessions", "write_control_event_id", "TEXT")
+                _ensure_column(connection, "events", "sender_union_id", "TEXT")
                 _ensure_column(
                     connection, "sessions", "writes_paused", "INTEGER NOT NULL DEFAULT 0"
                 )
@@ -907,6 +910,7 @@ def _inbound_from_row(row: sqlite3.Row, *, card_only: bool = False) -> InboundMe
         thread_id=str(row["thread_id"]) if row["thread_id"] else None,
         root_id=str(row["root_id"]) if row["root_id"] else None,
         card_only=card_only,
+        sender_union_id=str(row["sender_union_id"]) if row["sender_union_id"] else None,
     )
 
 

@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from lumon.agents.agent.config import AgentConfig
 from lumon.agents.agent.model import InboundImage, InboundMessage, RecalledMessage
+from lumon.agents.agent.reference_context import document_links
 from lumon.errors import AgentRuntimeError
 
 MessageHandler = Callable[[InboundMessage], Coroutine[object, object, None]]
@@ -420,6 +421,7 @@ def normalize_message(raw: object) -> InboundMessage | None:
         images=images,
         card_only=_has_interactive_card(_value(raw, "content", None))
         and (not plain_text or plain_text.casefold() in {"[interactive]", "[card]"}),
+        sender_union_id=_optional_text(_value(sender, "union_id", None)),
     )
 
 
@@ -472,13 +474,13 @@ def _plain_message_text(raw: object) -> str:
 
 
 def _interactive_card_text(content: object) -> str:
-    """Render the complete text from an SDK-fetched interactive card.
+    """Render the available text and document links from an interactive card.
 
     The channel SDK exposes the re-fetched CardKit payload as
     ``InboundMessage.content.card``. Its built-in renderer only understands
     CardKit v2 text tags, while email notifications commonly use CardKit v1
-    ``lark_md`` elements. Read both shapes here so the original email body and
-    its quoted history reach the Agent instead of only ``[interactive]``.
+    ``lark_md`` elements. Read both shapes so email and document previews reach
+    the Agent even when the SDK only renders ``[interactive]``.
     """
 
     card = _interactive_card_payload(content)
@@ -507,6 +509,9 @@ def _interactive_card_text(content: object) -> str:
             for key, value in node_mapping.items():
                 if key in {"tag", "schema", "config", "value", "options", "i18n_elements"}:
                     continue
+                if key in {"url", "pc_url", "default_url"} and isinstance(value, str):
+                    lines.extend(document_links(value))
+                    continue
                 visit(value)
             return
         if isinstance(node, (list, tuple)):
@@ -523,6 +528,7 @@ def _interactive_card_text(content: object) -> str:
         if locales is not None:
             first_locale = next(iter(locales.values()), ())
             visit(first_locale)
+    visit(card.get("card_link", {}))
 
     deduplicated: list[str] = []
     for line in lines:

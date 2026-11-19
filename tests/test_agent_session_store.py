@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -67,6 +68,14 @@ def test_event_claim_is_idempotent_and_history_is_chronological(tmp_path: Path) 
     store.mark_event_status(message.event_id, "processing")
     pending = store.recover_pending()
     assert pending == (message,)
+
+
+def test_pending_reference_lookup_keeps_the_authenticated_sender_identity(tmp_path: Path) -> None:
+    store = AgentSessionStore(db_path=tmp_path / "agent.sqlite3")
+    message = replace(_message("with-references"), sender_union_id="on_verified_sender")
+
+    assert store.claim_event(message.event_id, message)
+    assert AgentSessionStore(db_path=store.path).recover_pending() == (message,)
 
 
 def test_deferred_cards_are_merged_into_a_follow_up(tmp_path: Path) -> None:

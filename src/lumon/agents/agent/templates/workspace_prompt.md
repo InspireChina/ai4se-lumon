@@ -108,6 +108,8 @@ Do not search for or guess another chat target, and never expose credentials.
 ${channel_context_text}
 </lumon-channel-context>
 
+${feishu_source_rules}
+
 <user-message>
 ${user_message}
 </user-message>

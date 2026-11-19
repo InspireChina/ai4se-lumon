@@ -1203,8 +1203,10 @@ def test_startup_history_deduplicates_live_delivery_and_recovers_pending_work(
     assert channel.fetched == ([missed.event_id] if history_succeeds else [])
     expected = [pending.message_id]
     if history_outcome != "timeout":
+        assert store.event_status(missed.event_id) == "succeeded"
         expected.append(missed.message_id)
-    assert channel.typing_added == [*expected, live.message_id]
+    # Concurrent follow-ups can be requeued while the pending request is running.
+    assert sorted(channel.typing_added) == sorted([*expected, live.message_id])
 
 
 @pytest.mark.parametrize(
@@ -1297,6 +1299,40 @@ def test_non_execution_setting_save_does_not_replace_runtime(reload_runtime: Rel
     assert len(runtime.runners) == 1
     assert runtime.runners[0][1].agent_session_ids == [None, "provider-session-1"]
     assert runtime.channel.config.feishu_app_secret == runtime.config.feishu_app_secret
+
+
+def test_source_text_reaches_new_and_resumed_turns_without_entering_prompt_audit(
+    reload_runtime: ReloadRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = reload_runtime
+    source_text = "Full source body for this test"
+    resolved: list[str] = []
+
+    async def lookup(message: InboundMessage) -> str:
+        resolved.append(message.event_id)
+        return f"<feishu-reference-context>\n{source_text}\n</feishu-reference-context>"
+
+    monkeypatch.setattr("lumon.agents.agent.service.read_reference_context", lookup)
+    requests = [reload_message("first"), reload_message("second")]
+
+    async def run() -> None:
+        for message in requests:
+            await runtime.service.handle_message(message)
+            await runtime.service.wait_for_idle()
+        await runtime.service.stop()
+
+    asyncio.run(run())
+
+    runner = runtime.runners[0][1]
+    assert resolved == [message.event_id for message in requests]
+    assert runner.agent_session_ids == [None, "provider-session-1"]
+    assert all(source_text in prompt for prompt in runner.prompts)
+    assert all("review the entire email thread" in prompt for prompt in runner.prompts)
+    with sqlite3.connect(runtime.service.session_store.path) as connection:
+        stored = connection.execute("SELECT prompt_text FROM runs").fetchall()
+    assert len(stored) == 2
+    assert all(source_text not in prompt for (prompt,) in stored)
+    assert all(source_text not in repr(trace.updates) for trace in runtime.telemetry.traces)
 
 
 @pytest.mark.parametrize("failure", ["malformed", "missing", "insecure"])
@@ -1400,11 +1436,20 @@ class SteeringRunner(FakeRunner):
 def test_followup_steers_running_turn_once_and_persists_hold(
     reload_runtime: ReloadRuntime,
     followup: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = reload_runtime
     runner = SteeringRunner()
     runtime.service.agent_runner = runner
     message = replace(reload_message("followup"), text=followup)
+    source = "Source body for the follow-up"
+    lookups: list[str] = []
+
+    async def read_references(inbound: InboundMessage) -> str:
+        lookups.append(inbound.event_id)
+        return source if inbound.event_id == message.event_id else ""
+
+    monkeypatch.setattr("lumon.agents.agent.service.read_reference_context", read_references)
 
     async def run() -> None:
         try:
@@ -1430,6 +1475,8 @@ def test_followup_steers_running_turn_once_and_persists_hold(
 
     asyncio.run(run())
     assert len(runner.steered) == 1 and followup in runner.steered[0]
+    assert (source in runner.steered[0]) == (followup == "please add tests")
+    assert (message.event_id in lookups) == (followup == "please add tests")
     session = runtime.service.session_store.get_or_create_session(message)
     assert runtime.service.session_store.writes_paused(session.session_id) == ("commit" in followup)
     reopened = AgentSessionStore(db_path=runtime.service.session_store.path)

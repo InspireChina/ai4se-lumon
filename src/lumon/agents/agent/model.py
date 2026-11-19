@@ -116,6 +116,7 @@ class InboundMessage:
     root_id: str | None = None
     images: tuple[InboundImage, ...] = ()
     card_only: bool = False
+    sender_union_id: str | None = None
 
     @property
     def is_group(self) -> bool:

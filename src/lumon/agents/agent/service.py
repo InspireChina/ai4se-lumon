@@ -30,6 +30,7 @@ from lumon.agents.agent.model import (
     RecalledMessage,
     WorkspaceContext,
 )
+from lumon.agents.agent.reference_context import read_reference_context
 from lumon.agents.agent.runner import (
     AgentEventCallback,
     AgentRunner,
@@ -481,6 +482,9 @@ class AgentService:
                 stage = "download_images"
                 with tempfile.TemporaryDirectory(prefix="lumon-feishu-images-") as image_directory:
                     image_paths = await self._download_images(message, Path(image_directory))
+                    stage = "read_reference_context"
+                    references = await read_reference_context(message)
+                    agent_prompt = f"{prompt}\n\n{references}" if references else prompt
                     stage = "run_agent"
                     async with trace.span(
                         "codex.exec",
@@ -501,7 +505,7 @@ class AgentService:
                                 context,
                                 message,
                                 session_id,
-                                prompt,
+                                agent_prompt,
                                 resume_session_id,
                                 image_paths,
                                 Path(image_directory),
@@ -798,6 +802,10 @@ class AgentService:
             prompt = builder.build_resume_prompt(
                 message.text, channel_context=message.channel_context, inspect_environment=False
             )
+            if policy is None:
+                references = await read_reference_context(message)
+                if references:
+                    prompt = f"{prompt}\n\n{references}"
             receipt = active.control.submit(SteeringInput(prompt, images, policy))
             if receipt is None and policy is not None:
                 # Never let a saturated ordinary-input queue delay a stop request.
@@ -1275,10 +1283,14 @@ def _merge_deferred_card_context(
 ) -> str:
     """Keep a deferred card as data while treating the follow-up as the request."""
 
-    card_text = "\n\n".join(card.text for card in cards if card.text.strip())
+    card_text = "\n\n".join(
+        f"<feishu-card-context>\n{card.text}\n</feishu-card-context>"
+        for card in cards
+        if card.text.strip()
+    )
     if not card_text:
         return user_text
-    return f"<feishu-card-context>\n{card_text}\n</feishu-card-context>\n\n{user_text}"
+    return f"{card_text}\n\n{user_text}"
 
 
 def _validated_flow_id(flow_id: str | None, context: WorkspaceContext) -> str | None:
