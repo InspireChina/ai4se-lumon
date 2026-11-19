@@ -40,6 +40,7 @@ export interface MarkdownDocumentLabels {
   subtitle: string;
   unsaved: string;
   select: string;
+  loading: string;
   refresh: string;
   new: string;
   empty: string;
@@ -116,7 +117,7 @@ export function MarkdownDocumentsPage<
   const [draft, setDraft] = useState(false);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
-  const [loadingDocument, setLoadingDocument] = useState(false);
+  const [pendingDocumentId, setPendingDocumentId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [viewMode, setViewMode] = useState<DocumentViewMode>("preview");
@@ -127,13 +128,14 @@ export function MarkdownDocumentsPage<
   const [filter, setFilter] = useState("all");
   const selection = useRef(0);
   const openDetails = Boolean(initialDocumentId && details);
+  const loadingDocument = pendingDocumentId !== null;
 
   useEffect(() => {
     let cancelled = false;
     const request = ++selection.current;
     setLoading(true);
     setDocuments([]);
-    setLoadingDocument(false);
+    setPendingDocumentId(null);
     setDocument(null);
     setDraft(false);
     setContent("");
@@ -151,11 +153,11 @@ export function MarkdownDocumentsPage<
         const first = nextDocuments[0];
         const nextId = initialDocumentId ?? (first ? getId(first) : null);
         if (!nextId || request !== selection.current) return;
-        setSelectedId(nextId);
-        setLoadingDocument(true);
+        setPendingDocumentId(nextId);
         setLoading(false);
         const selectedDocument = await api.get(workspaceId, nextId);
         if (cancelled || request !== selection.current) return;
+        setSelectedId(nextId);
         setDocument(selectedDocument);
         setContent(selectedDocument.content);
         if (openDetails && selectedDocument.valid) setViewMode("details");
@@ -169,7 +171,7 @@ export function MarkdownDocumentsPage<
       .finally(() => {
         if (!cancelled) {
           setLoading(false);
-          if (request === selection.current) setLoadingDocument(false);
+          if (request === selection.current) setPendingDocumentId(null);
         }
       });
     return () => {
@@ -180,37 +182,40 @@ export function MarkdownDocumentsPage<
 
   async function selectDocument(summary: TSummary): Promise<void> {
     const nextId = getId(summary);
-    if (nextId === selectedId && (document || loadingDocument)) return;
+    if (nextId === pendingDocumentId) return;
+    if (nextId === selectedId) {
+      if (loadingDocument) {
+        selection.current++;
+        setPendingDocumentId(null);
+      }
+      return;
+    }
     if (!confirmDiscard()) return;
     const request = ++selection.current;
-    setSelectedId(nextId);
-    setDocument(null);
-    setDraft(false);
-    setContent("");
-    setViewMode("preview");
-    setDetailsDirty(false);
-    setDetailsRevision((revision) => revision + 1);
-    onDirtyChange(false);
-    setLoadingDocument(true);
+    setPendingDocumentId(nextId);
     try {
       const nextDocument = await api.get(workspaceId, nextId);
       if (request !== selection.current) return;
+      setSelectedId(nextId);
       setDocument(nextDocument);
+      setDraft(false);
       setContent(nextDocument.content);
+      setViewMode("preview");
+      discardDetailsChanges();
+      onDirtyChange(false);
     } catch (reason) {
       if (request === selection.current) {
-        setSelectedId(null);
         onError(messageFor(reason, labels.loadFailed));
       }
     } finally {
-      if (request === selection.current) setLoadingDocument(false);
+      if (request === selection.current) setPendingDocumentId(null);
     }
   }
 
   async function createDocument(): Promise<void> {
     if (!confirmDiscard()) return;
     selection.current++;
-    setLoadingDocument(false);
+    setPendingDocumentId(null);
     setSelectedId(null);
     setDocument(null);
     setDraft(true);
@@ -222,6 +227,7 @@ export function MarkdownDocumentsPage<
   }
 
   async function saveDocument(): Promise<void> {
+    if (loadingDocument) return;
     if (!draft && (!document || !selectedId)) return;
     setSaving(true);
     try {
@@ -248,7 +254,7 @@ export function MarkdownDocumentsPage<
   }
 
   async function toggleDocument(): Promise<void> {
-    if (!document || !selectedId || !document.valid) return;
+    if (loadingDocument || !document || !selectedId || !document.valid) return;
     if (!confirmDiscard()) return;
     discardDetailsChanges();
     const nextContent = replaceEnabledFlag(content, !document.enabled);
@@ -273,7 +279,7 @@ export function MarkdownDocumentsPage<
   }
 
   async function deleteDocument(): Promise<void> {
-    if (!selectedId || !document || !window.confirm(labels.confirmDelete)) return;
+    if (loadingDocument || !selectedId || !document || !window.confirm(labels.confirmDelete)) return;
     discardDetailsChanges();
     setDeleting(true);
     try {
@@ -367,8 +373,9 @@ export function MarkdownDocumentsPage<
               <option value="disabled">{labels.disabled}</option>
             </select>
           </div>
+          {loadingDocument && <span className="sr-only" role="status">{labels.loading}</span>}
           {loading ? (
-            <div className="loading-inline flows-loading"><LoaderCircle size={20} className="spin" />Loading…</div>
+            <div className="loading-inline flows-loading"><LoaderCircle size={20} className="spin" />{labels.loading}</div>
           ) : documents.length === 0 ? (
             <div className="flow-catalog-empty"><strong>{labels.empty}</strong><p>{labels.emptyHelp}</p></div>
           ) : visibleDocuments.length === 0 ? (
@@ -388,12 +395,14 @@ export function MarkdownDocumentsPage<
                     type="button"
                     key={summary.path + ":" + id}
                     aria-current={id === selectedId ? "true" : undefined}
+                    aria-busy={id === pendingDocumentId || undefined}
                     disabled={saving || deleting}
                     onClick={() => void selectDocument(summary)}
                   >
                     <span className="flow-row-copy"><strong>{summary.name || id}</strong><small>{summary.brief || summary.path}</small>{!summary.valid && <em>{summary.error ?? labels.invalid}</em>}</span>
                     <span className="flow-status-dot" data-status={!summary.valid ? "invalid" : summary.enabled ? "enabled" : "disabled"} title={statusLabel}>
                       <span className="sr-only">{statusLabel}</span>
+                      {id === pendingDocumentId && <LoaderCircle className="flow-row-spinner spin" size={13} />}
                     </span>
                   </button>
                 );
@@ -402,7 +411,7 @@ export function MarkdownDocumentsPage<
           )}
         </section>
 
-        <section className="flow-editor-panel">
+        <section className="flow-editor-panel" inert={loadingDocument} aria-busy={loadingDocument}>
           <div className="flow-editor-heading">
             <div>
               <h2>{document?.name ?? (draft ? labels.new : labels.select)}</h2>
@@ -429,15 +438,13 @@ export function MarkdownDocumentsPage<
               {documentDetails.render(document, (value) => {
                 setDetailsDirty(value);
                 onDirtyChange(value || contentDirty);
-              }, contentDirty || saving || deleting, headerActions)}
+              }, loadingDocument || contentDirty || saving || deleting, headerActions)}
             </div>
           )}
-          {loadingDocument ? (
-            <div className="loading-inline"><LoaderCircle size={20} className="spin" />Loading…</div>
-          ) : document || draft ? (
+          {document || draft ? (
             <>
               {viewMode === "preview" ? (
-                <MarkdownPreview content={content} metadataLabel={labels.metadata} />
+                <MarkdownPreview key={selectedId} content={content} metadataLabel={labels.metadata} />
               ) : viewMode === "edit" && (
                 <textarea
                   className="flow-editor"
@@ -471,7 +478,7 @@ export function MarkdownDocumentsPage<
               </div>
             </>
           ) : (
-            <div className="flow-editor-empty muted">{labels.idHelp}</div>
+            <div className="flow-editor-empty muted">{loadingDocument ? labels.loading : labels.idHelp}</div>
           )}
         </section>
       </div>

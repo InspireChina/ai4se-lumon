@@ -21,6 +21,7 @@ const labels: MarkdownDocumentLabels = {
   subtitle: "Manage documents.",
   unsaved: "Unsaved",
   select: "Select a document",
+  loading: "Loading resource…",
   refresh: "Refresh",
   new: "New document",
   empty: "No documents",
@@ -126,6 +127,54 @@ describe("MarkdownDocumentsPage", () => {
       expect(container.querySelector(".flow-editor-heading h2")?.textContent).toBe("Other capability");
       expect(container.querySelector(".flow-row[aria-current='true'] svg")).toBeNull();
       expect(props.onError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("keeps the current document in place until the next document loads", async () => {
+    const api = createDocumentApi();
+    const first = await api.get("workspace-1", "my-capability");
+    const second = { ...first, id: "second", name: "Second", content: "# Second" };
+    const missing = { ...first, id: "missing", name: "Missing" };
+    vi.mocked(api.list).mockResolvedValue([first, second, missing]);
+    let finishLoad!: (document: TestDocument) => void;
+    vi.mocked(api.get).mockImplementation(async (_workspaceId, id) => {
+      if (id === "missing") throw new Error("Document unavailable");
+      if (id === second.id) return new Promise((resolve) => { finishLoad = resolve; });
+      return first;
+    });
+    const onError = vi.fn();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MarkdownDocumentsPage
+        workspaceId="workspace-1" onDirtyChange={vi.fn()} onNotice={vi.fn()} onError={onError}
+        labels={labels} starterContent={starterContent} api={api} getId={getId}
+      />));
+      const reader = container.querySelector(".flow-editor-panel")!;
+      const preview = reader.querySelector(".flow-markdown-preview");
+      await act(async () => buttonWithText(container, second.name).click());
+      expect(reader.getAttribute("aria-busy")).toBe("true");
+      expect(reader.hasAttribute("inert")).toBe(true);
+      expect(reader.querySelector(".flow-markdown-preview")).toBe(preview);
+      expect(container.querySelector(".flow-row.active strong")?.textContent).toBe(first.name);
+
+      await act(async () => buttonWithText(container, first.name).click());
+      await act(async () => finishLoad(second));
+      expect(reader.querySelector(".flow-markdown-preview")).toBe(preview);
+      expect(reader.hasAttribute("inert")).toBe(false);
+
+      await act(async () => buttonWithText(container, second.name).click());
+      await act(async () => finishLoad(second));
+      expect(reader.hasAttribute("inert")).toBe(false);
+      expect(reader.querySelector(".flow-markdown-preview")?.textContent).toBe(second.name);
+      expect(container.querySelector(".flow-row.active strong")?.textContent).toBe(second.name);
+
+      await act(async () => buttonWithText(container, missing.name).click());
+      expect(onError).toHaveBeenCalledWith("Document unavailable");
+      expect(reader.hasAttribute("inert")).toBe(false);
+      expect(reader.querySelector(".flow-markdown-preview")?.textContent).toBe(second.name);
     } finally {
       await act(async () => root.unmount());
     }

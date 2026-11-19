@@ -69,6 +69,7 @@ export function FlowsPage(props: FlowsPageProps): React.JSX.Element {
     subtitle: t("flows.subtitle"),
     unsaved: t("flows.unsaved"),
     select: t("flows.select"),
+    loading: t("resources.loading"),
     refresh: t("flows.refresh"),
     new: t("flows.new"),
     empty: t("flows.empty"),

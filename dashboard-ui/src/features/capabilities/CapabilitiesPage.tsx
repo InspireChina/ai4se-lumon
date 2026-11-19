@@ -61,6 +61,7 @@ export function CapabilitiesPage(props: CapabilitiesPageProps): React.JSX.Elemen
     subtitle: t("capabilities.subtitle"),
     unsaved: t("capabilities.unsaved"),
     select: t("capabilities.select"),
+    loading: t("resources.loading"),
     refresh: t("capabilities.refresh"),
     new: t("capabilities.new"),
     empty: t("capabilities.empty"),
