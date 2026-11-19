@@ -481,10 +481,12 @@ class AgentService:
                 reporter = _ProgressReporter(self._channel, message)
                 stage = "download_images"
                 with tempfile.TemporaryDirectory(prefix="lumon-feishu-images-") as image_directory:
-                    image_paths = await self._download_images(message, Path(image_directory))
+                    image_root = Path(image_directory)
+                    image_paths = await self._download_images(message, image_root)
                     stage = "read_reference_context"
-                    references = await read_reference_context(message)
-                    agent_prompt = f"{prompt}\n\n{references}" if references else prompt
+                    references = await read_reference_context(message, image_directory=image_root)
+                    agent_prompt = f"{prompt}\n\n{references.text}" if references.text else prompt
+                    image_paths += references.images
                     stage = "run_agent"
                     async with trace.span(
                         "codex.exec",
@@ -508,7 +510,7 @@ class AgentService:
                                 agent_prompt,
                                 resume_session_id,
                                 image_paths,
-                                Path(image_directory),
+                                image_root,
                                 reporter.notify,
                                 event_observer.observe,
                             )
@@ -794,18 +796,18 @@ class AgentService:
             ):
                 policy = "pause"
             images: tuple[Path, ...] = ()
-            # Safety commands reach interrupt before slow/failed attachment downloads.
-            if message.images and policy is None:
-                destination = active.image_directory / uuid4().hex
-                destination.mkdir()
-                images = await self._download_images(message, destination)
             prompt = builder.build_resume_prompt(
                 message.text, channel_context=message.channel_context, inspect_environment=False
             )
+            # Safety commands reach interrupt before slow/failed attachment downloads.
             if policy is None:
-                references = await read_reference_context(message)
-                if references:
-                    prompt = f"{prompt}\n\n{references}"
+                destination = active.image_directory / uuid4().hex
+                destination.mkdir()
+                images = await self._download_images(message, destination)
+                references = await read_reference_context(message, image_directory=destination)
+                if references.text:
+                    prompt = f"{prompt}\n\n{references.text}"
+                images += references.images
             receipt = active.control.submit(SteeringInput(prompt, images, policy))
             if receipt is None and policy is not None:
                 # Never let a saturated ordinary-input queue delay a stop request.

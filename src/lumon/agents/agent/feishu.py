@@ -519,6 +519,10 @@ def _interactive_card_text(content: object) -> str:
                 visit(item)
 
     visit(card.get("header", {}))
+    if not lines:
+        title = _optional_text(card.get("title"))
+        if title:
+            lines.append(title)
     if "body" in card:
         visit(card.get("body"))
     elif "elements" in card:

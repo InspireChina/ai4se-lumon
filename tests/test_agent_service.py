@@ -27,6 +27,7 @@ from lumon.agents.agent.model import (
     ProgressPhase,
     RecalledMessage,
 )
+from lumon.agents.agent.reference_context import ReferenceContext
 from lumon.agents.agent.runner import (
     AgentEventCallback,
     AgentRunner,
@@ -1301,16 +1302,20 @@ def test_non_execution_setting_save_does_not_replace_runtime(reload_runtime: Rel
     assert runtime.channel.config.feishu_app_secret == runtime.config.feishu_app_secret
 
 
-def test_source_text_reaches_new_and_resumed_turns_without_entering_prompt_audit(
+def test_source_evidence_reaches_new_and_resumed_turns_without_entering_prompt_audit(
     reload_runtime: ReloadRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = reload_runtime
     source_text = "Full source body for this test"
     resolved: list[str] = []
 
-    async def lookup(message: InboundMessage) -> str:
+    async def lookup(message: InboundMessage, *, image_directory: Path) -> ReferenceContext:
         resolved.append(message.event_id)
-        return f"<feishu-reference-context>\n{source_text}\n</feishu-reference-context>"
+        image = image_directory / "attachment.png"
+        image.write_bytes(b"image fixture")
+        return ReferenceContext(
+            f"<feishu-reference-context>\n{source_text}\n</feishu-reference-context>", (image,)
+        )
 
     monkeypatch.setattr("lumon.agents.agent.service.read_reference_context", lookup)
     requests = [reload_message("first"), reload_message("second")]
@@ -1328,6 +1333,11 @@ def test_source_text_reaches_new_and_resumed_turns_without_entering_prompt_audit
     assert runner.agent_session_ids == [None, "provider-session-1"]
     assert all(source_text in prompt for prompt in runner.prompts)
     assert all("review the entire email thread" in prompt for prompt in runner.prompts)
+    assert [[path.name for path in images] for images in runner.images] == [
+        ["attachment.png"],
+        ["attachment.png"],
+    ]
+    assert all(not path.exists() for images in runner.images for path in images)
     with sqlite3.connect(runtime.service.session_store.path) as connection:
         stored = connection.execute("SELECT prompt_text FROM runs").fetchall()
     assert len(stored) == 2
@@ -1402,6 +1412,7 @@ class SteeringRunner(FakeRunner):
         self.received = asyncio.Event()
         self.release = asyncio.Event()
         self.steered: list[str] = []
+        self.steered_images: tuple[bytes, ...] = ()
         self.policies: list[str | None] = []
         self.accept_steering = accept_steering
 
@@ -1424,6 +1435,7 @@ class SteeringRunner(FakeRunner):
             self.started.set()
             request = await control.receive()
             self.steered.append(request.input.text)
+            self.steered_images = tuple(path.read_bytes() for path in request.input.images)
             request.accepted.set_result(self.accept_steering)
             self.received.set()
             await self.release.wait()
@@ -1445,9 +1457,15 @@ def test_followup_steers_running_turn_once_and_persists_hold(
     source = "Source body for the follow-up"
     lookups: list[str] = []
 
-    async def read_references(inbound: InboundMessage) -> str:
+    async def read_references(
+        inbound: InboundMessage, *, image_directory: Path
+    ) -> ReferenceContext:
         lookups.append(inbound.event_id)
-        return source if inbound.event_id == message.event_id else ""
+        if inbound.event_id != message.event_id:
+            return ReferenceContext()
+        image = image_directory / "attachment.png"
+        image.write_bytes(b"follow-up image")
+        return ReferenceContext(source, (image,))
 
     monkeypatch.setattr("lumon.agents.agent.service.read_reference_context", read_references)
 
@@ -1477,6 +1495,9 @@ def test_followup_steers_running_turn_once_and_persists_hold(
     assert len(runner.steered) == 1 and followup in runner.steered[0]
     assert (source in runner.steered[0]) == (followup == "please add tests")
     assert (message.event_id in lookups) == (followup == "please add tests")
+    assert runner.steered_images == (
+        (b"follow-up image",) if followup == "please add tests" else ()
+    )
     session = runtime.service.session_store.get_or_create_session(message)
     assert runtime.service.session_store.writes_paused(session.session_id) == ("commit" in followup)
     reopened = AgentSessionStore(db_path=runtime.service.session_store.path)

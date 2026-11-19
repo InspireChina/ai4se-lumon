@@ -11,8 +11,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parseaddr, parsedate_to_datetime
 from html import unescape
+from pathlib import Path
 from typing import cast
 
+from lumon.agents.agent.mail_attachment import (
+    AttachmentKind,
+    attachment_evidence,
+    attachment_kind,
+    download_mail_attachment,
+)
 from lumon.agents.agent.model import InboundMessage
 
 _DOC_URL = re.compile(
@@ -25,11 +32,26 @@ _MAIL_SENDER = re.compile(
     r"^(?:sender|from|发件人|寄件人|發件人)\s*[:：]\s*(.+)$", re.IGNORECASE | re.MULTILINE
 )
 _MAIL_TIME = re.compile(r"^(?:time|date|时间|時間)\s*[:：]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_LOCAL_MAIL_DATE = re.compile(
+    r"(\d{4}年\d{1,2}月\d{1,2}日)\s*"
+    r"(?:[（(]\s*(?:周|週|星期)[一二三四五六日天]\s*[）)]\s*)?"
+    r"(\d{1,2}:\d{2})(?=\s|$)"
+)
 _MAX_SOURCE_LENGTH = 160_000
+_MAX_ATTACHMENT_COUNT = 32
+_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+_MAX_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024
 _READ_TIMEOUT = 12
 
 CliRead = Callable[..., Mapping[str, object]]
 AsyncCliRead = Callable[..., Awaitable[Mapping[str, object]]]
+AttachmentDownload = Callable[[str, int], bytes | None]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceContext:
+    text: str = ""
+    images: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +59,15 @@ class MailPreview:
     subject: str
     sender: str
     date: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _MailAttachment:
+    message_id: str
+    attachment_id: str
+    kind: AttachmentKind
+    media_type: str
+    source: dict[str, object]
 
 
 def document_links(text: str) -> tuple[str, ...]:
@@ -59,37 +90,51 @@ def _references(text: str) -> tuple[tuple[MailPreview, ...], tuple[str, ...]]:
     return tuple(dict.fromkeys(previews)), document_links(document_text)
 
 
-async def read_reference_context(message: InboundMessage, *, read: CliRead | None = None) -> str:
+async def read_reference_context(
+    message: InboundMessage,
+    *,
+    image_directory: Path,
+    read: CliRead | None = None,
+    download: AttachmentDownload = download_mail_attachment,
+) -> ReferenceContext:
     """Fetch the original sources without altering the stored inbound message."""
 
     previews, documents = _references(message.text)
     if not previews and not documents:
-        return ""
+        return ReferenceContext()
     if message.is_group or message.sender_type != "user":
-        return _render([], "Full-source lookup is available in the matching user's direct chat.")
+        return _render(
+            [],
+            image_directory,
+            "Full-source lookup is available in the matching user's direct chat.",
+        )
 
     async def read_source(*args: str) -> Mapping[str, object]:
         return await asyncio.to_thread(read or _read_cli, *args)
 
+    sources: list[dict[str, object]] = []
+    attachments: list[_MailAttachment] = []
+    issue = ""
     try:
         async with asyncio.timeout(30):
-            return await _read_sources(message, previews, documents, read_source)
+            profile = await read_source("contact", "+get-user")
+            if _same_user(message, _object(profile.get("user"))):
+                await _read_sources(previews, documents, read_source, sources, attachments)
+                await _read_attachments(attachments, read_source, download, image_directory)
+            else:
+                issue = "The local Feishu login could not be matched to the requester."
     except TimeoutError:
-        return _render([], "Full-source lookup timed out.")
+        issue = "Full-source lookup timed out. Some sources may be missing."
+    return _render(sources, image_directory, issue)
 
 
 async def _read_sources(
-    message: InboundMessage,
     previews: tuple[MailPreview, ...],
     documents: tuple[str, ...],
     read: AsyncCliRead,
-) -> str:
-    profile = await read("contact", "+get-user")
-    identity = _object(profile.get("user"))
-    if not _same_user(message, identity):
-        return _render([], "The local Feishu login could not be matched to the requester.")
-
-    sources: list[dict[str, object]] = []
+    sources: list[dict[str, object]],
+    attachments: list[_MailAttachment],
+) -> None:
     seen_threads: set[str] = set()
     for preview in previews:
         thread = await _resolve_thread(preview, read)
@@ -98,7 +143,10 @@ async def _read_sources(
             continue
         if thread[0] not in seen_threads:
             seen_threads.add(thread[0])
-            sources.append(await _read_thread(preview.subject, *thread, read))
+            source, messages = await _read_thread(preview.subject, *thread, read)
+            sources.append(source)
+            for index, item in enumerate(messages, start=1):
+                attachments.extend(_mail_attachments(preview.subject, index, item, sources))
     for url in documents:
         result = await read("docs", "+fetch", "--doc", url, "--doc-format", "markdown")
         document = _object(result.get("document"))
@@ -109,7 +157,6 @@ async def _read_sources(
             sources.append(
                 {"kind": "document", "reference": url, "status": "complete", "content": content}
             )
-    return _render(sources)
 
 
 def _same_user(message: InboundMessage, identity: Mapping[str, object]) -> bool:
@@ -125,10 +172,12 @@ def _mail_preview(text: str) -> MailPreview | None:
     date = _MAIL_TIME.search(plain)
     if sender is None or date is None or not plain:
         return None
-    address = parseaddr(sender[1])[1].casefold()
+    address = parseaddr(sender[1].replace("\u00ad", ""))[1].casefold()
     if not address or "@" not in address:
         return None
-    return MailPreview(plain.splitlines()[0].lstrip("# ").strip(), address, _date(date[1]))
+    local_date = _LOCAL_MAIL_DATE.match(plain, date.start(1))
+    timestamp = f"{local_date[1]} {local_date[2]}" if local_date else date[1]
+    return MailPreview(plain.splitlines()[0].lstrip("# ").strip(), address, _date(timestamp))
 
 
 def _date(value: str) -> datetime | None:
@@ -138,6 +187,11 @@ def _date(value: str) -> datetime | None:
         return datetime.fromtimestamp(timestamp, UTC)
     if ":" not in value:
         return None
+    if "年" in value:
+        try:
+            return datetime.strptime(value, "%Y年%m月%d日 %H:%M")
+        except ValueError:
+            return None
     try:
         return parsedate_to_datetime(value)
     except ValueError:
@@ -195,7 +249,7 @@ async def _resolve_thread(preview: MailPreview, read: AsyncCliRead) -> tuple[str
 
 async def _read_thread(
     subject: str, thread_id: str, message_id: str, read: AsyncCliRead
-) -> dict[str, object]:
+) -> tuple[dict[str, object], list[Mapping[str, object]]]:
     thread = await read("mail", "+thread", "--thread-id=" + thread_id, "--html=false")
     messages = _objects(thread.get("messages"))
     if (
@@ -204,40 +258,124 @@ async def _read_thread(
         or thread.get("has_more") is True
         or not any(item.get("message_id") == message_id for item in messages)
     ):
-        return _unavailable("email_thread", subject)
+        return _unavailable("email_thread", subject), []
     delivered = [
         item
         for item in messages
         if item.get("message_state_text") != "draft" and item.get("message_state") not in (3, "3")
     ]
-    if not delivered or any(not _has_plain_body(item) for item in delivered):
-        return _unavailable("email_thread", subject)
-    return {
+    if not delivered:
+        return _unavailable("email_thread", subject), []
+    message_bodies = [_mail_body(item) for item in delivered]
+    complete = all("body_plain_text" in body for body in message_bodies)
+    source: dict[str, object] = {
         "kind": "email_thread",
         "reference": subject,
-        "status": "complete",
-        "messages": [
-            {
-                key: item[key]
-                for key in (
-                    "subject",
-                    "head_from",
-                    "to",
-                    "cc",
-                    "date",
-                    "date_formatted",
-                    "body_plain_text",
-                )
-                if key in item
-            }
-            for item in delivered
-        ],
+        "status": "complete" if complete else "partial",
+        "messages": message_bodies,
+    }
+    if not complete:
+        source["reason"] = "One or more messages did not include a readable body."
+    return source, delivered
+
+
+def _mail_attachments(
+    subject: str, index: int, message: Mapping[str, object], sources: list[dict[str, object]]
+) -> list[_MailAttachment]:
+    message_id = _string(message.get("message_id"))
+    attachments: list[_MailAttachment] = []
+    for item in _objects(message.get("attachments")):
+        filename = _string(item.get("filename")) or "Unnamed attachment"
+        media_type = _string(item.get("content_type"))
+        attachment_id = _string(item.get("id"))
+        source = {
+            **_unavailable("email_attachment", filename),
+            "thread": subject,
+            "message_number": index,
+            "inline": item.get("is_inline") is True,
+        }
+        sources.append(source)
+        kind = attachment_kind(filename, media_type)
+        if kind is None:
+            source["reason"] = "Unsupported attachment format."
+        elif not message_id or not attachment_id:
+            source["reason"] = "Feishu did not provide an attachment identifier."
+        else:
+            source["reason"] = "Attachment lookup did not finish."
+            attachments.append(_MailAttachment(message_id, attachment_id, kind, media_type, source))
+    return attachments
+
+
+async def _read_attachments(
+    attachments: list[_MailAttachment],
+    read: AsyncCliRead,
+    download: AttachmentDownload,
+    directory: Path,
+) -> None:
+    by_message: dict[str, list[_MailAttachment]] = {}
+    for index, item in enumerate(attachments):
+        if index >= _MAX_ATTACHMENT_COUNT:
+            item.source["reason"] = "Attachment count exceeds the limit for this turn."
+        else:
+            by_message.setdefault(item.message_id, []).append(item)
+
+    remaining = _MAX_ATTACHMENT_TOTAL_BYTES
+    for message_id, items in by_message.items():
+        urls = await _attachment_urls(message_id, items, read)
+        for item in items:
+            url = urls.get(item.attachment_id)
+            if not url:
+                item.source["reason"] = "Feishu did not return a download link."
+                continue
+            if remaining <= 0:
+                item.source["reason"] = "Attachments exceed the size limit for this turn."
+                continue
+            limit = min(remaining, _MAX_ATTACHMENT_BYTES)
+            content = await asyncio.to_thread(download, url, limit)
+            if content is None or len(content) > limit:
+                item.source["reason"] = "Download failed or exceeded the size limit."
+                continue
+            remaining -= len(content)
+            evidence = attachment_evidence(
+                content, kind=item.kind, media_type=item.media_type, directory=directory
+            )
+            if "reason" not in evidence:
+                del item.source["reason"]
+                item.source["status"] = "complete"
+            item.source.update(evidence)
+
+
+async def _attachment_urls(
+    message_id: str, items: list[_MailAttachment], read: AsyncCliRead
+) -> dict[str, str]:
+    params = json.dumps(
+        {
+            "user_mailbox_id": "me",
+            "message_id": message_id,
+            "attachment_ids": list(dict.fromkeys(item.attachment_id for item in items)),
+        }
+    )
+    result = await read(
+        "mail", "user_mailbox.message.attachments", "download_url", "--params", params
+    )
+    return {
+        _string(item.get("attachment_id")): _string(item.get("download_url"))
+        for item in _objects(result.get("download_urls"))
     }
 
 
-def _has_plain_body(message: Mapping[str, object]) -> bool:
+def _mail_body(message: Mapping[str, object]) -> dict[str, object]:
+    evidence = {
+        key: message[key]
+        for key in ("subject", "head_from", "to", "cc", "date", "date_formatted")
+        if key in message
+    }
     body = message.get("body_plain_text")
-    return isinstance(body, str) and bool(body.strip() or not message.get("body_preview"))
+    if isinstance(body, str) and (body.strip() or not message.get("body_preview")):
+        evidence["body_plain_text"] = body
+    else:
+        evidence["body_status"] = "unavailable"
+    return evidence
 
 
 def _read_cli(*args: str) -> Mapping[str, object]:
@@ -261,27 +399,33 @@ def _read_cli(*args: str) -> Mapping[str, object]:
     return {}
 
 
-def _render(sources: list[dict[str, object]], issue: str = "") -> str:
+def _render(sources: list[dict[str, object]], directory: Path, issue: str = "") -> ReferenceContext:
     records: list[dict[str, object]] = []
+    images: dict[str, int] = {}
     used = 0
     for source in sources:
-        size = len(json.dumps(source, ensure_ascii=False))
+        size = len(json.dumps(source, ensure_ascii=False).replace("<", "\\u003c"))
         if used + size > _MAX_SOURCE_LENGTH:
-            records.append(
-                {
-                    **_unavailable(_string(source["kind"]), _string(source["reference"])),
-                    "reason": "Source exceeds the context limit.",
-                }
-            )
-        else:
-            records.append(source)
-            used += size
+            record = {
+                key: value
+                for key, value in source.items()
+                if key not in {"content", "messages", "image"}
+            }
+            record.update(status="unavailable", reason="Source exceeds the context limit.")
+            records.append(record)
+            continue
+        image = _string(source.get("image"))
+        if image:
+            source["image_number"] = images.setdefault(image, len(images) + 1)
+        records.append(source)
+        used += size
     content = json.dumps({"sources": records, "issue": issue}, ensure_ascii=False)
-    return (
+    text = (
         "<feishu-reference-context>\n"
         + content.replace("<", "\\u003c")
         + "\n</feishu-reference-context>"
     )
+    return ReferenceContext(text, tuple(directory / image for image in images))
 
 
 def _unavailable(kind: str, reference: str) -> dict[str, object]:

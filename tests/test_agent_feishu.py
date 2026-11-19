@@ -410,6 +410,24 @@ def test_document_card_preserves_original_link_without_the_preview_anchor() -> N
     assert message.text == "Deployment document\nhttps://example.feishu.cn/docx/Test123"
 
 
+def test_mail_card_accepts_the_top_level_title_from_feishu() -> None:
+    message = normalize_message(
+        {
+            **_raw("p2p", "[interactive]"),
+            "content": SimpleNamespace(
+                card={
+                    "title": "Release approval",
+                    "elements": [{"tag": "lark_md", "content": "A shortened preview…"}],
+                },
+            ),
+        }
+    )
+
+    assert message is not None
+    assert message.card_only
+    assert message.text == "Release approval\nA shortened preview…"
+
+
 def test_group_reply_creates_a_thread_for_a_top_level_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
