@@ -6,7 +6,6 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -26,7 +25,7 @@ from lumon.workspace.settings import WorkspaceSettingsStore
 
 
 @pytest.fixture
-def branch_workspace(tmp_path: Path) -> Iterator[tuple[httpx.Client, str, Path, list[str]]]:
+def branch_workspace(tmp_path: Path) -> Iterator[tuple[TestClient, str, Path, list[str]]]:
     root = tmp_path / "workspace"
     registry = WorkspaceRegistry(tmp_path / "state")
     settings = WorkspaceSettingsStore(tmp_path / "state")
@@ -69,7 +68,7 @@ def branch_workspace(tmp_path: Path) -> Iterator[tuple[httpx.Client, str, Path, 
 
 
 def test_branch_update_preserves_other_settings_and_existing_work(
-    branch_workspace: tuple[httpx.Client, str, Path, list[str]],
+    branch_workspace: tuple[TestClient, str, Path, list[str]],
 ) -> None:
     client, base, root, _ = branch_workspace
     path = root / "lumon" / "workspace.toml"
@@ -106,7 +105,7 @@ def test_branch_update_preserves_other_settings_and_existing_work(
 
 
 def test_selecting_the_saved_branch_is_a_noop(
-    branch_workspace: tuple[httpx.Client, str, Path, list[str]],
+    branch_workspace: tuple[TestClient, str, Path, list[str]],
 ) -> None:
     client, base, root, _ = branch_workspace
     path = root / "lumon" / "workspace.toml"
@@ -124,7 +123,7 @@ def test_selecting_the_saved_branch_is_a_noop(
     "branch", ["", "   ", "bad..name", "-main", "new-branch", "a\nb", "x" * 257]
 )
 def test_invalid_or_missing_branch_does_not_change_config(
-    branch_workspace: tuple[httpx.Client, str, Path, list[str]], branch: str
+    branch_workspace: tuple[TestClient, str, Path, list[str]], branch: str
 ) -> None:
     client, base, root, _ = branch_workspace
     path = root / "lumon" / "workspace.toml"
@@ -138,7 +137,7 @@ def test_invalid_or_missing_branch_does_not_change_config(
 
 
 def test_branch_access_is_scoped_and_updates_require_local_origin(
-    branch_workspace: tuple[httpx.Client, str, Path, list[str]],
+    branch_workspace: tuple[TestClient, str, Path, list[str]],
 ) -> None:
     client, base, root, branches = branch_workspace
     path = root / "lumon" / "workspace.toml"

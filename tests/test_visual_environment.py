@@ -6,7 +6,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
@@ -23,7 +22,7 @@ from lumon.workspace.initializer import WorkspaceInitializer
 from lumon.workspace.model import InitRequest
 
 
-def _client(service: DashboardService) -> httpx.Client:
+def _client(service: DashboardService) -> TestClient:
     return TestClient(create_app(service))
 
 

@@ -194,6 +194,9 @@ the Workspace repository, returned by the Dashboard API, or included in
 Lumon logs. Existing Workspace directories are not discovered by scanning;
 add them explicitly from the onboarding page or with `lumon ui --workspace`.
 
+Use [Auto Test](docs/auto-test.md) to run Jira acceptance cases against approved
+QA builds and download Excel reports and recordings from the Dashboard.
+
 ## Agent
 
 Agent is the local Workspace Agent. It listens for Feishu messages over the

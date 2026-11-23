@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CheckCircle2,
   FolderGit2,
+  FlaskConical,
   GitBranch,
   LayoutDashboard,
   Library,
@@ -22,12 +23,11 @@ import { AgentSettingsPage } from "../features/agent/AgentSettingsPage";
 import { ChatHistoryPage } from "../features/agent/ChatHistoryPage";
 import { AutoDeliveryPage } from "../features/delivery/AutoDeliveryPage";
 import { AutoScanPage } from "../features/scan/AutoScanPage";
+import { AutoTestPage } from "../features/autoTest/AutoTestPage";
 import { CapabilitiesPage } from "../features/capabilities/CapabilitiesPage";
 import { SkillsPage } from "../features/skills/SkillsPage";
 import { FlowsPage } from "../features/flows/FlowsPage";
-import { SettingsPage } from "../features/settings/SettingsPage";
-import { AutoDeliverySettingsPanel } from "../features/settings/AutoDeliverySettingsPanel";
-import { AutoScanSettingsPanel } from "../features/settings/AutoScanSettingsPanel";
+import { WorkspaceSettingsPanels } from "../features/settings/WorkspaceSettingsPanels";
 import { WorkspaceOnboarding } from "../features/workspaces/WorkspaceOnboarding";
 import { WorkspaceOverview } from "../features/workspaces/WorkspaceOverview";
 import { RepositoriesPage } from "../features/workspaces/RepositoriesPage";
@@ -37,6 +37,7 @@ import { LanguagePicker, useI18n, type Translator } from "../shared/i18n";
 import type {
   AgentSettings,
   AgentSettingsUpdate,
+  AutoTestSettings,
   SettingsUpdate,
   View,
   WorkspaceListItem,
@@ -64,14 +65,13 @@ export function App(): React.JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [agentSettingsDirty, setAgentSettingsDirty] = useState(false);
-  const [autoDeliveryDirty, setAutoDeliveryDirty] = useState(false);
-  const [autoScanDirty, setAutoScanDirty] = useState(false);
   const [flowsDirty, setFlowsDirty] = useState(false);
   const [capabilitiesDirty, setCapabilitiesDirty] = useState(false);
   const [repositoriesDirty, setRepositoriesDirty] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
-  const hasUnsavedWorkspaceChanges = settingsDirty || agentSettingsDirty || autoDeliveryDirty || autoScanDirty || flowsDirty || capabilitiesDirty || repositoriesDirty;
+  const focusAutoTestSettings = useRef(false);
+  const hasUnsavedWorkspaceChanges = settingsDirty || agentSettingsDirty || flowsDirty || capabilitiesDirty || repositoriesDirty;
   const viewLabels: Record<View, string> = {
     overview: t("app.overview"),
     settings: t("app.settings"),
@@ -79,6 +79,7 @@ export function App(): React.JSX.Element {
     agent: t("app.agentSettings"),
     "auto-delivery": t("app.autoDelivery"),
     "auto-scan": t("app.autoScan"),
+    "auto-test": "Auto Test",
     flows: t("app.flows"),
     capabilities: t("app.capabilities"),
     skills: t("app.skills"),
@@ -134,6 +135,12 @@ export function App(): React.JSX.Element {
   }, [selectedId, view]);
 
   useEffect(() => {
+    if (view !== "settings" || !settings || !focusAutoTestSettings.current) return;
+    focusAutoTestSettings.current = false;
+    document.getElementById("auto-test-settings")?.focus();
+  }, [settings, view]);
+
+  useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 3500);
     return () => window.clearTimeout(timer);
@@ -146,8 +153,6 @@ export function App(): React.JSX.Element {
     ) return;
     setSettingsDirty(false);
     setAgentSettingsDirty(false);
-    setAutoDeliveryDirty(false);
-    setAutoScanDirty(false);
     setFlowsDirty(false);
     setCapabilitiesDirty(false);
     setRepositoriesDirty(false);
@@ -171,19 +176,17 @@ export function App(): React.JSX.Element {
   function changeView(nextView: View): void {
     if (nextView === view) return;
     const currentViewDirty = view === "settings"
-      ? settingsDirty || agentSettingsDirty || autoDeliveryDirty || autoScanDirty
+      ? settingsDirty || agentSettingsDirty
         : view === "flows"
           ? flowsDirty
           : view === "capabilities"
             ? capabilitiesDirty
           : view === "repositories"
             ? repositoriesDirty
-          : false;
+            : false;
     if (currentViewDirty && !window.confirm(t("app.unsavedViewConfirm"))) return;
     setSettingsDirty(false);
     setAgentSettingsDirty(false);
-    setAutoDeliveryDirty(false);
-    setAutoScanDirty(false);
     setFlowsDirty(false);
     setCapabilitiesDirty(false);
     setRepositoriesDirty(false);
@@ -203,8 +206,6 @@ export function App(): React.JSX.Element {
       setAddingWorkspace(false);
       setSettingsDirty(false);
       setAgentSettingsDirty(false);
-      setAutoDeliveryDirty(false);
-      setAutoScanDirty(false);
       setFlowsDirty(false);
       setCapabilitiesDirty(false);
       setRepositoriesDirty(false);
@@ -217,16 +218,32 @@ export function App(): React.JSX.Element {
   }
 
   async function saveSettings(update: SettingsUpdate): Promise<boolean> {
-    if (!selectedId) return false;
+    if (!selectedId || selectedWorkspace.current !== workspaceSelection) return false;
     try {
       const saved = await dashboardApi.updateSettings(selectedId, update);
-      setSettings(saved);
-      setNotice(t("app.settingsSaved"));
-      setError(null);
+      if (selectedWorkspace.current === workspaceSelection) {
+        setSettings(saved);
+        setNotice(t("app.settingsSaved"));
+        setError(null);
+      }
       return true;
     } catch (reason) {
-      setError(messageFor(reason, t));
+      if (selectedWorkspace.current === workspaceSelection) setError(messageFor(reason, t));
       return false;
+    }
+  }
+
+  async function saveAutoTestSettings(update: Partial<AutoTestSettings>): Promise<AutoTestSettings | undefined> {
+    if (!selectedId || selectedWorkspace.current !== workspaceSelection) return;
+    try {
+      const saved = await dashboardApi.saveAutoTestSettings(selectedId, update);
+      if (selectedWorkspace.current === workspaceSelection) {
+        setNotice(t("app.settingsSaved"));
+        setError(null);
+      }
+      return saved;
+    } catch (reason) {
+      if (selectedWorkspace.current === workspaceSelection) setError(messageFor(reason, t));
     }
   }
 
@@ -301,6 +318,7 @@ export function App(): React.JSX.Element {
           <p className="nav-group-label">{t("app.automationGroup")}</p>
           <button className={view === "auto-delivery" ? "active" : ""} title={viewLabels["auto-delivery"]} aria-label={viewLabels["auto-delivery"]} aria-current={view === "auto-delivery" ? "page" : undefined} type="button" onClick={() => changeView("auto-delivery")}><Rocket size={17} /><span>{viewLabels["auto-delivery"]}</span></button>
           <button className={view === "auto-scan" ? "active" : ""} title={viewLabels["auto-scan"]} aria-label={viewLabels["auto-scan"]} aria-current={view === "auto-scan" ? "page" : undefined} type="button" onClick={() => changeView("auto-scan")}><ScanSearch size={17} /><span>{viewLabels["auto-scan"]}</span></button>
+          <button className={view === "auto-test" ? "active" : ""} title="Auto Test" aria-label="Auto Test" aria-current={view === "auto-test" ? "page" : undefined} type="button" onClick={() => changeView("auto-test")}><FlaskConical size={17} /><span>Auto Test</span></button>
           <p className="nav-group-label">{t("app.libraryGroup")}</p>
           <button className={view === "flows" ? "active" : ""} title={viewLabels.flows} aria-label={viewLabels.flows} aria-current={view === "flows" ? "page" : undefined} type="button" onClick={() => changeView("flows")}><GitBranch size={17} /><span>{viewLabels.flows}</span></button>
           <button className={view === "capabilities" ? "active" : ""} title={viewLabels.capabilities} aria-label={viewLabels.capabilities} aria-current={view === "capabilities" ? "page" : undefined} type="button" onClick={() => changeView("capabilities")}><Puzzle size={17} /><span>{viewLabels.capabilities}</span></button>
@@ -326,7 +344,9 @@ export function App(): React.JSX.Element {
           <div className="topbar-page"><span>{t("app.workspaceConsole")}</span><ChevronRight size={14} aria-hidden="true" /><strong>{viewLabels[view]}</strong></div>
           <div className="topbar-actions">
             <LanguagePicker />
-            <div className="topbar-context"><span className="topbar-label">{t("app.currentWorkspace")}</span><WorkspacePicker workspaces={workspaces} selectedId={selectedId} onChange={changeWorkspace} onAdd={startAddingWorkspace} /></div>
+            <div className="topbar-context">
+              <WorkspacePicker workspaces={workspaces} selectedId={selectedId} onChange={changeWorkspace} onAdd={startAddingWorkspace} />
+            </div>
           </div>
         </header>
         {error && <Notice type="error" message={error} onClose={() => setError(null)} closeLabel={t("app.close")} />}
@@ -334,15 +354,16 @@ export function App(): React.JSX.Element {
           {selectedId && view === "overview" && overview && <WorkspaceOverview overview={overview} settings={settings} agentSettings={agentSettings} onNavigate={changeView} onOpenWorkflow={openWorkflow} onRefresh={() => void refreshCurrent()} refreshing={refreshing} />}
           {selectedId && view === "repositories" && overview?.workspace_id === selectedId && <RepositoriesPage key={selectedId} overview={overview} onRefresh={refreshCurrent} onDirtyChange={setRepositoriesDirty} onNotice={(message) => { if (selectedWorkspace.current === workspaceSelection) setNotice(message); }} />}
           {selectedId && view === "repositories" && overview?.workspace_id !== selectedId && !error && <div className="loading-inline"><LoaderCircle className="spin" size={22} />{t("app.readingWorkspace")}</div>}
-          {selectedId && view === "settings" && settings && <div className="page-stack">
-            <SettingsPage settings={settings} onSave={saveSettings} onTest={testSettings} onDirtyChange={setSettingsDirty} />
-            <AutoDeliverySettingsPanel key={`delivery-${selectedId}`} settings={settings} onSave={saveSettings} onDirtyChange={setAutoDeliveryDirty} />
-            <AutoScanSettingsPanel key={`scan-${selectedId}`} settings={settings} onSave={saveSettings} onDirtyChange={setAutoScanDirty} />
+          {selectedId && view === "settings" && settings?.workspace_id === selectedId && <div className="page-stack">
+            <WorkspaceSettingsPanels key={`workspace-settings-${selectedId}`} settings={settings} onSave={saveSettings} onSaveAutoTest={saveAutoTestSettings}
+              onTest={testSettings} onDirtyChange={setSettingsDirty} onError={setError} />
             {agentSettings && <AgentSettingsPage key={selectedId} workspaceId={selectedId ?? undefined} settings={agentSettings} workspaces={workspaces} onSave={saveAgentSettings} onDirtyChange={setAgentSettingsDirty} />}
           </div>}
           {selectedId && view === "agent" && <ChatHistoryPage key={selectedId} workspaceId={selectedId} />}
           {selectedId && view === "auto-delivery" && <AutoDeliveryPage key={selectedId} workspaceId={selectedId} onError={setError} />}
           {selectedId && view === "auto-scan" && <AutoScanPage key={selectedId} workspaceId={selectedId} onError={setError} />}
+          {selectedId && view === "auto-test" && <AutoTestPage key={selectedId} workspaceId={selectedId}
+            onSettings={() => { focusAutoTestSettings.current = true; changeView("settings"); }} onError={setError} />}
           {selectedId && view === "flows" && <FlowsPage workspaceId={selectedId} initialDocumentId={workflowId} onDirtyChange={setFlowsDirty} onNotice={setNotice} onError={setError} />}
           {selectedId && view === "capabilities" && <CapabilitiesPage workspaceId={selectedId} onDirtyChange={setCapabilitiesDirty} onNotice={setNotice} onError={setError} />}
           {selectedId && view === "skills" && <SkillsPage key={selectedId} workspaceId={selectedId} />}

@@ -6,7 +6,6 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -86,13 +85,13 @@ def test_org_filter_uses_the_account_host_and_validated_path(
 
 
 @pytest.fixture
-def client(tmp_path: Path) -> Iterator[httpx.Client]:
+def client(tmp_path: Path) -> Iterator[TestClient]:
     with TestClient(routes.create_app(DashboardService(state_root=tmp_path))) as session:
         yield session
 
 
 def test_new_routes_do_not_call_workspace_branch_route(
-    client: httpx.Client, pages: list[str]
+    client: TestClient, pages: list[str]
 ) -> None:
     orgs = client.post("/api/repository-sources/organizations", json={"host": "team.ghe.com"})
     branches = client.post(

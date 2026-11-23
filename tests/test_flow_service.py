@@ -7,7 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -28,7 +27,7 @@ from lumon.workspace.registry import WorkspaceRegistry
 from lumon.workspace.settings import WorkspaceSettingsStore
 
 
-def _client(dashboard: DashboardService) -> httpx.Client:
+def _client(dashboard: DashboardService) -> TestClient:
     return TestClient(create_app(dashboard))
 
 

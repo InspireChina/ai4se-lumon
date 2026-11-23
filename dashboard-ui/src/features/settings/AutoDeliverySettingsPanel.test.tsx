@@ -48,13 +48,6 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves a multiline trigger prompt and
 
     const helpButtons = Array.from(container.querySelectorAll<HTMLButtonElement>(".field-help-toggle"));
     expect(helpButtons).toHaveLength(4);
-    const jqlHelp = document.querySelector("#auto-delivery-jql-help")!.textContent!;
-    const jqlUsage = {
-      en: ["Jira Query Language (JQL)", "scheduled check", "configured Jira site", "Existing receipts", "at most one card", "no Agent run", "ORDER BY", "newer move", "status =", "Completed"],
-      "zh-CN": ["Jira 查询语言（JQL）", "每次定时检查", "已配置的 Jira 站点", "交付记录", "最多启动一张", "不启动 Agent", "ORDER BY", "重新移入", "status =", "Completed"],
-      "zh-TW": ["Jira 查詢語言（JQL）", "每次排程檢查", "已設定的 Jira 站點", "交付紀錄", "最多啟動一張", "不啟動 Agent", "ORDER BY", "重新移入", "status =", "Completed"],
-    };
-    for (const explanation of jqlUsage[locale]) expect(jqlHelp).toContain(explanation);
     for (const button of helpButtons) {
       const helpId = button.getAttribute("aria-controls")!;
       const help = document.querySelector<HTMLParagraphElement>(`#${helpId}`)!;
@@ -116,9 +109,9 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves a multiline trigger prompt and
     });
     await fill(prompt);
     await act(async () => save.click());
+    const deliveryControls = { enabled: false, schedule_expression: "*/5 * * * *", publish_mode: "branch", target_branch: "", trigger_jql: "" };
     expect(onSave).toHaveBeenLastCalledWith({
-      feishu_webhook: { enabled: true },
-      auto_delivery: { ...settings.auto_delivery, trigger_hooks: [prompt] },
+      auto_delivery: { ...deliveryControls, trigger_hooks: [prompt] },
     });
     await render({ ...settings, auto_delivery: { ...settings.auto_delivery, trigger_hooks: [prompt] } });
     expect(field.value).toBe(prompt);
@@ -127,8 +120,7 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves a multiline trigger prompt and
     await fill(" \n ");
     await act(async () => save.click());
     expect(onSave).toHaveBeenLastCalledWith({
-      feishu_webhook: { enabled: true },
-      auto_delivery: { ...settings.auto_delivery, trigger_hooks: [] },
+      auto_delivery: { ...deliveryControls, trigger_hooks: [] },
     });
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   } finally {
@@ -140,7 +132,7 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves a multiline trigger prompt and
   }
 });
 
-it("keeps Jira detection and publication edits scoped to this panel, including a failed save", async () => {
+it("requires saved Jira settings before enabling and retains publication edits after a failed save", async () => {
   const settings: WorkspaceSettings = {
     workspace_id: "workspace-id",
     feishu_webhook: { enabled: false, configured: false, masked_url: null },
@@ -163,6 +155,8 @@ it("keeps Jira detection and publication edits scoped to this panel, including a
     const toggle = container.querySelector<HTMLInputElement>('[role="switch"]')!;
     expect(policy.value).toBe("local");
     expect(Array.from(policy.options, (option) => option.value)).toEqual(["local", "branch", "pr", "direct"]);
+    expect(container.querySelector("#auto-delivery-jira-site")).toBeNull();
+    expect(container.querySelector("#auto-delivery-jql")).not.toBeNull();
     expect(container.querySelector("#auto-delivery-target-branch")).toBeNull();
     await act(async () => toggle.click());
     expect(save.disabled).toBe(true);
@@ -175,13 +169,14 @@ it("keeps Jira detection and publication edits scoped to this panel, including a
       Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(field, text);
       field.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await fill("#auto-delivery-jira-site", "test.atlassian.net");
     await fill("#auto-delivery-jql", "project = TEST AND Flagged = Impediment");
     await fill("#auto-delivery-target-branch", "release");
     await act(async () => save.click());
     expect(onSave).toHaveBeenLastCalledWith({
-      feishu_webhook: { enabled: false },
-      auto_delivery: { ...settings.auto_delivery, jira_site: "test.atlassian.net", trigger_jql: "project = TEST AND Flagged = Impediment", publish_mode: "pr", target_branch: "release" },
+      auto_delivery: {
+        enabled: false, trigger_hooks: ["Deliver flagged Stories."], schedule_expression: "*/5 * * * *",
+        publish_mode: "pr", target_branch: "release", trigger_jql: "project = TEST AND Flagged = Impediment",
+      },
     });
     expect(save.disabled).toBe(false);
     expect(container.querySelector<HTMLInputElement>("#auto-delivery-target-branch")!.value).toBe("release");

@@ -7,13 +7,17 @@ import os
 import re
 import tempfile
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import tomli_w
+from pydantic import ValidationError
+
+from lumon.auto_test.config import JIRA_PROJECT_KEY_PATTERN, AutoTestSettings
 from lumon.errors import InvalidInputError, PreflightError
 from lumon.tools.feishu_webhook import validate_webhook_url
 from lumon.workspace.registry import UserStateLayout
@@ -44,6 +48,12 @@ class FeishuWebhookSettings:
     url: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class JiraSettings:
+    site: str
+    project: str
+
+
 class DeliveryPublishMode(StrEnum):
     """The Workspace's explicit authorization for publishing delivered code."""
 
@@ -64,6 +74,7 @@ class AutoDeliverySettings:
     trigger_jql: str = ""
     publish_mode: DeliveryPublishMode = DeliveryPublishMode.LOCAL
     target_branch: str = ""
+    jira_project: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +107,20 @@ class WorkspaceSettings:
     auto_delivery: AutoDeliverySettings = AutoDeliverySettings()
     auto_scan: AutoScanSettings = AutoScanSettings()
     flow_schedules: tuple[FlowScheduleSettings, ...] = ()
+    auto_test: AutoTestSettings = AutoTestSettings()
+    jira: JiraSettings | None = None
+
+    def with_jira(self, jira: JiraSettings) -> WorkspaceSettings:
+        return replace(
+            self,
+            jira=jira,
+            auto_delivery=replace(
+                self.auto_delivery, jira_site=jira.site, jira_project=jira.project
+            ),
+            auto_test=self.auto_test.model_copy(
+                update={"jira_site": jira.site, "jira_project": jira.project}
+            ),
+        )
 
 
 class WorkspaceSettingsStore:
@@ -135,11 +160,16 @@ class WorkspaceSettingsStore:
     def save(self, settings: WorkspaceSettings) -> None:
         """Validate and atomically write one profile with owner-only permissions."""
 
+        if settings.jira is not None:
+            settings = settings.with_jira(
+                validate_jira_settings(settings.jira.site, settings.jira.project)
+            )
         if settings.feishu_webhook.url is not None:
             validate_webhook_url(settings.feishu_webhook.url)
         _validate_auto_delivery(settings.auto_delivery)
         _validate_auto_scan(settings.auto_scan)
         _validate_flow_schedules(settings.flow_schedules)
+        validate_auto_test_settings(settings.auto_test)
         path = self.path_for(settings.workspace_id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,7 +369,11 @@ def _parse_settings(
         _validate_flow_schedules(tuple(flow_schedules))
     except InvalidInputError as exc:
         raise PreflightError(f"Invalid Flow schedules: {source}") from exc
-    return WorkspaceSettings(
+    try:
+        auto_test = AutoTestSettings.model_validate(payload.get("auto_test", {}))
+    except ValidationError as exc:
+        raise PreflightError(f"Invalid Auto Test settings: {source}") from exc
+    settings = WorkspaceSettings(
         workspace_id=workspace_id,
         feishu_webhook=FeishuWebhookSettings(enabled=enabled, url=url),
         auto_delivery=AutoDeliverySettings(
@@ -359,7 +393,24 @@ def _parse_settings(
             workflow_description=workflow_description.strip(),
         ),
         flow_schedules=tuple(flow_schedules),
+        auto_test=auto_test,
     )
+    if "jira" in payload:
+        raw_jira = payload["jira"]
+        if not isinstance(raw_jira, dict):
+            raise PreflightError(f"Invalid Jira settings: {source}")
+        jira = cast(dict[str, object], raw_jira)
+        try:
+            settings = settings.with_jira(
+                validate_jira_settings(jira.get("site"), jira.get("project"))
+            )
+        except InvalidInputError as exc:
+            raise PreflightError(f"Invalid Jira settings: {source}") from exc
+    try:
+        validate_auto_test_settings(settings.auto_test)
+    except InvalidInputError as exc:
+        raise PreflightError(f"Invalid Auto Test settings: {source}") from exc
+    return settings
 
 
 def _render(settings: WorkspaceSettings) -> str:
@@ -392,6 +443,15 @@ def _render(settings: WorkspaceSettings) -> str:
             f"workflow_description = {_toml_string(settings.auto_scan.workflow_description)}",
         ]
     )
+    if settings.jira is not None:
+        lines.extend(
+            [
+                "",
+                "[jira]",
+                f"site = {_toml_string(settings.jira.site)}",
+                f"project = {_toml_string(settings.jira.project)}",
+            ]
+        )
     for schedule in sorted(settings.flow_schedules, key=lambda item: item.flow_id):
         lines.extend(
             [
@@ -402,7 +462,13 @@ def _render(settings: WorkspaceSettings) -> str:
                 f"schedule_expression = {_toml_string(schedule.schedule_expression)}",
             ]
         )
-    return "\n".join(lines) + "\n"
+    return (
+        "\n".join(lines)
+        + "\n\n"
+        + tomli_w.dumps(
+            {"auto_test": settings.auto_test.model_dump(mode="json", exclude_none=True)}
+        )
+    )
 
 
 def _toml_string(value: str) -> str:
@@ -482,6 +548,16 @@ def _validate_auto_delivery(settings: AutoDeliverySettings) -> None:
     validate_delivery_target_branch(settings.target_branch)
 
 
+def validate_auto_test_settings(settings: AutoTestSettings) -> None:
+    validate_schedule_expression(settings.schedule_expression, label="Auto Test")
+    if _UNSUPPORTED_PROMPT_CHARACTERS.search(settings.trigger_jql):
+        raise InvalidInputError("Auto Test JQL contains unsupported control characters.")
+    if settings.enabled and (
+        not settings.jira_site or not settings.jira_project or not settings.trigger_jql
+    ):
+        raise InvalidInputError("Configure the Jira site, project and query before scheduling.")
+
+
 def validate_delivery_jira_site(value: object) -> str:
     """Accept an optional, credential-free Jira Cloud hostname."""
 
@@ -493,6 +569,18 @@ def validate_delivery_jira_site(value: object) -> str:
             "Auto Delivery Jira site must be a host such as team.atlassian.net."
         )
     return site
+
+
+def validate_jira_settings(site: object, project: object) -> JiraSettings:
+    try:
+        host = validate_delivery_jira_site(site)
+    except InvalidInputError as exc:
+        raise InvalidInputError("Enter a Jira Cloud site such as team.atlassian.net.") from exc
+    if not host:
+        raise InvalidInputError("Enter a Jira Cloud site such as team.atlassian.net.")
+    if not isinstance(project, str) or not re.fullmatch(JIRA_PROJECT_KEY_PATTERN, project.strip()):
+        raise InvalidInputError("Enter the exact Jira project key, such as TEAM.")
+    return JiraSettings(host, project.strip())
 
 
 def validate_delivery_jql(value: object) -> str:

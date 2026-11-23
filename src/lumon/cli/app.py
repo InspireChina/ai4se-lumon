@@ -8,6 +8,7 @@ import typer
 
 from lumon.cli.commands import (
     agent,
+    auto_test,
     delivery,
     doctor,
     flow,
@@ -61,6 +62,7 @@ app.add_typer(agent.agent_app, name="agent")
 app.add_typer(workspace.workspace_app, name="workspace")
 app.add_typer(delivery.delivery_app, name="delivery")
 app.add_typer(scan.scan_app, name="scan")
+app.add_typer(auto_test.test_app, name="test")
 app.add_typer(flow.flow_app, name="flow")
 app.add_typer(webhook.webhook_app, name="webhook")
 

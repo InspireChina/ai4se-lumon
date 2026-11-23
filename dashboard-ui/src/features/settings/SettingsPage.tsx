@@ -81,7 +81,10 @@ export function SettingsPage({
 
       <section className="panel settings-panel">
         <div className="panel-heading">
-          <div className="settings-title"><span className="workspace-glyph glyph-blue"><Bell size={18} /></span><div><p className="eyebrow">{t("settings.notifications")}</p><h2>{t("settings.feishu")}</h2></div></div>
+          <div className="settings-title">
+            <span className="workspace-glyph glyph-blue"><Bell size={18} /></span>
+            <h2>{t("settings.feishu")}</h2>
+          </div>
           <div className="settings-heading-actions">
             <label className={`settings-toggle ${enabled ? "is-enabled" : ""}`}>
               <span>{enabled ? t("settings.enabled") : t("settings.disabled")}</span>

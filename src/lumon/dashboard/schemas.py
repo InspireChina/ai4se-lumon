@@ -401,6 +401,20 @@ class AutoScanResponse(StrictModel):
     workflow_description: str
 
 
+class JiraSettingsRequest(StrictModel):
+    site: str = Field(max_length=253)
+    project: str = Field(max_length=64)
+
+
+class JiraSettingsResponse(JiraSettingsRequest):
+    configured: bool
+
+
+class JiraTestResponse(StrictModel):
+    success: bool
+    detail: str
+
+
 class WorkspaceSettingsResponse(StrictModel):
     """Display-safe Workspace settings."""
 
@@ -408,6 +422,7 @@ class WorkspaceSettingsResponse(StrictModel):
     feishu_webhook: FeishuWebhookResponse
     auto_delivery: AutoDeliveryResponse
     auto_scan: AutoScanResponse
+    jira: JiraSettingsResponse
 
 
 class FeishuWebhookUpdate(StrictModel):
@@ -420,7 +435,7 @@ class FeishuWebhookUpdate(StrictModel):
 class AutoDeliveryUpdate(StrictModel):
     """Workspace Auto Delivery permission update."""
 
-    enabled: bool
+    enabled: bool | None = None
     trigger_hooks: list[str] | None = None
     schedule_expression: str | None = None
     jira_site: str | None = Field(default=None, max_length=253)
@@ -442,9 +457,10 @@ class AutoScanUpdate(StrictModel):
 class WorkspaceSettingsUpdate(StrictModel):
     """Typed settings update without a generic key-value escape hatch."""
 
-    feishu_webhook: FeishuWebhookUpdate
+    feishu_webhook: FeishuWebhookUpdate | None = None
     auto_delivery: AutoDeliveryUpdate | None = None
     auto_scan: AutoScanUpdate | None = None
+    jira: JiraSettingsRequest | None = None
 
 
 class ScanFindingIgnoreRequest(StrictModel):

@@ -2,6 +2,9 @@ import type {
   AgentModel,
   AgentSettings,
   AgentSettingsUpdate,
+  AutoTestHistory,
+  AutoTestSettings,
+  AutoTestWorkbookSheet,
   BootstrapState,
   CapabilityDocument,
   CapabilitySummary,
@@ -13,6 +16,7 @@ import type {
   DeliveryHistory,
   FlowDocument,
   FlowSummary,
+  JiraSettings,
   InitializeWorkspaceRequest,
   InitializeWorkspaceResponse,
   RemoteRepository,
@@ -77,6 +81,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const dashboardApi = {
+  autoTestSettings(workspaceId: string): Promise<AutoTestSettings> {
+    return request(`/api/workspaces/${workspaceId}/auto-test/settings`, { cache: "no-store" });
+  },
+  saveAutoTestSettings(workspaceId: string, settings: Partial<AutoTestSettings>): Promise<AutoTestSettings> {
+    return request(`/api/workspaces/${workspaceId}/auto-test/settings`, { method: "PUT", body: JSON.stringify(settings) });
+  },
+  autoTestHistory(workspaceId: string): Promise<AutoTestHistory> {
+    return request(`/api/workspaces/${workspaceId}/auto-test/runs`, { cache: "no-store" });
+  },
+  autoTestWorkbookPreview(fileUrl: string, signal: AbortSignal): Promise<AutoTestWorkbookSheet[]> {
+    return request(`${fileUrl}/preview`, { cache: "no-store", signal });
+  },
+  startAutoTest(workspaceId: string, retest?: string): Promise<{ accepted: boolean }> {
+    return request(`/api/workspaces/${workspaceId}/auto-test/runs`, { method: "POST", body: JSON.stringify({ retest }) });
+  },
+  stopAutoTest(workspaceId: string, runId: string): Promise<{ accepted: boolean }> {
+    return request(`/api/workspaces/${workspaceId}/auto-test/runs/${runId}/stop`, { method: "POST" });
+  },
+  publishAutoTest(workspaceId: string, runId: string): Promise<void> {
+    return request(`/api/workspaces/${workspaceId}/auto-test/runs/${runId}/publish`, { method: "POST" });
+  },
   getSetup(): Promise<SetupReport> {
     return request("/api/setup", { cache: "no-store" });
   },
@@ -342,6 +367,12 @@ export const dashboardApi = {
 
   ignoreScanFinding(workspaceId: string, runId: string, findingIndex: number): Promise<ScanRun[]> {
     return request<ScanRun[]>(`/api/workspaces/${workspaceId}/scans/${encodeURIComponent(runId)}/findings/${findingIndex}/ignore`, { method: "POST", body: JSON.stringify({ ignored: true }) });
+  },
+
+  testJira(workspaceId: string, settings: JiraSettings): Promise<{ success: boolean; detail: string }> {
+    return request(`/api/workspaces/${workspaceId}/settings/jira/test`, {
+      method: "POST", body: JSON.stringify(settings),
+    });
   },
 
   testFeishu(workspaceId: string, url?: string): Promise<WebhookTestResponse> {

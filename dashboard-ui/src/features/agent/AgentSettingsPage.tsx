@@ -142,12 +142,9 @@ export function AgentSettingsPage({
         <div className="panel-heading">
           <div className="settings-title">
             <span className="workspace-glyph glyph-violet"><Bot size={18} /></span>
-            <div>
-              <p className="eyebrow">{t("agent.runtime")}</p>
-              <div className="field-label-heading">
-                <h2 id="agent-runtime-title">{t("agent.title")}</h2>
-                <HelpTooltip helpId="agent-apply-help" label={t("agent.title")} help={t("agent.applyHelp")} />
-              </div>
+            <div className="field-label-heading">
+              <h2 id="agent-runtime-title">{t("agent.title")}</h2>
+              <HelpTooltip helpId="agent-apply-help" label={t("agent.title")} help={t("agent.applyHelp")} />
             </div>
           </div>
           <div className="settings-heading-actions">
@@ -242,12 +239,9 @@ export function AgentSettingsPage({
         <div className="panel-heading">
           <div className="settings-title">
             <span className="workspace-glyph glyph-violet"><Activity size={18} /></span>
-            <div>
-              <p className="eyebrow">{t("agent.observability")}</p>
-              <div className="field-label-heading">
-                <h2 id="agent-langfuse-title">{t("agent.langfuse")}</h2>
-                <HelpTooltip helpId="agent-langfuse-help" label={t("agent.langfuse")} help={t("agent.langfuseDescription")} />
-              </div>
+            <div className="field-label-heading">
+              <h2 id="agent-langfuse-title">{t("agent.langfuse")}</h2>
+              <HelpTooltip helpId="agent-langfuse-help" label={t("agent.langfuse")} help={t("agent.langfuseDescription")} />
             </div>
           </div>
           <div className="settings-heading-actions">

@@ -63,6 +63,7 @@ from lumon.tools.feishu_directory import FeishuDirectory
 from lumon.tools.feishu_webhook import FeishuWebhookSender, WebhookTestResult, validate_webhook_url
 from lumon.tools.github_repositories import GithubRepository, repository_spec
 from lumon.tools.setup import SetupInspector, SetupReport
+from lumon.tools.twg_jira import JiraConnectionResult, verify_jira_connection
 from lumon.visual import environment
 from lumon.workspace.config import WorkspaceConfig, load_workspace_config
 from lumon.workspace.initializer import WorkspaceInitializer
@@ -78,6 +79,7 @@ from lumon.workspace.settings import (
     DeliveryPublishMode,
     FeishuWebhookSettings,
     FlowScheduleSettings,
+    JiraSettings,
     WorkspaceSettings,
     WorkspaceSettingsStore,
     masked_secret,
@@ -222,6 +224,8 @@ class WorkspaceSettingsView:
     feishu_webhook: WebhookSettingsView
     auto_delivery: AutoDeliverySettingsView
     auto_scan: AutoScanSettingsView
+    jira: JiraSettings
+    jira_configured: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1136,7 +1140,7 @@ class DashboardService:
     def update_settings(
         self,
         workspace_id: UUID,
-        enabled: bool,
+        enabled: bool | None,
         url_provided: bool,
         url: str | None,
         auto_delivery_enabled: bool | None = None,
@@ -1151,11 +1155,19 @@ class DashboardService:
         auto_scan_trigger_hooks: tuple[str, ...] | None = None,
         auto_scan_schedule_expression: str | None = None,
         auto_scan_workflow_description: str | None = None,
+        jira: JiraSettings | None = None,
     ) -> WorkspaceSettingsView:
         """Update typed settings while retaining or clearing URL explicitly."""
 
         registration = self._require(workspace_id)
         current = self.settings_store.load(workspace_id)
+        shared_jira = jira if jira is not None else current.jira
+        if (
+            shared_jira is not None
+            and auto_delivery_jira_site is not None
+            and validate_delivery_jira_site(auto_delivery_jira_site) != shared_jira.site
+        ):
+            raise InvalidInputError("Change the shared Jira site in the Jira panel.")
         next_url = current.feishu_webhook.url
         if url_provided:
             next_url = url.strip() if url and url.strip() else None
@@ -1163,7 +1175,9 @@ class DashboardService:
                 validate_webhook_url(next_url)
         updated = WorkspaceSettings(
             workspace_id=workspace_id,
-            feishu_webhook=FeishuWebhookSettings(enabled=enabled, url=next_url),
+            feishu_webhook=FeishuWebhookSettings(
+                enabled=current.feishu_webhook.enabled if enabled is None else enabled, url=next_url
+            ),
             auto_delivery=AutoDeliverySettings(
                 enabled=(
                     current.auto_delivery.enabled
@@ -1227,9 +1241,19 @@ class DashboardService:
                 ),
             ),
             flow_schedules=current.flow_schedules,
+            auto_test=current.auto_test,
         )
-        if auto_delivery_enabled is True and (
-            not updated.auto_delivery.jira_site or not updated.auto_delivery.trigger_jql
+        if shared_jira is not None:
+            updated = updated.with_jira(shared_jira)
+        updating_delivery_trigger = (
+            auto_delivery_enabled is True
+            or auto_delivery_jira_site is not None
+            or auto_delivery_trigger_jql is not None
+        )
+        if (
+            updating_delivery_trigger
+            and updated.auto_delivery.enabled
+            and (not updated.auto_delivery.jira_site or not updated.auto_delivery.trigger_jql)
         ):
             raise InvalidInputError(
                 "Configure Auto Delivery's Jira site and trigger JQL before enabling it."
@@ -1257,6 +1281,12 @@ class DashboardService:
             self.settings_store.restore_raw(workspace_id, snapshot)
             raise
         return _settings_view(updated)
+
+    async def test_jira_connection(
+        self, workspace_id: UUID, jira: JiraSettings
+    ) -> JiraConnectionResult:
+        self._require(workspace_id)
+        return await verify_jira_connection(jira)
 
     def test_feishu_webhook(
         self,
@@ -1324,6 +1354,14 @@ class DashboardService:
 
 def _settings_view(settings: WorkspaceSettings) -> WorkspaceSettingsView:
     webhook = settings.feishu_webhook
+    jira = settings.jira
+    if jira is None:
+        legacy_sites = {settings.auto_delivery.jira_site, settings.auto_test.jira_site} - {""}
+        jira = (
+            JiraSettings(next(iter(legacy_sites)), settings.auto_test.jira_project)
+            if len(legacy_sites) == 1
+            else JiraSettings("", "")
+        )
     return WorkspaceSettingsView(
         workspace_id=settings.workspace_id,
         feishu_webhook=WebhookSettingsView(
@@ -1347,6 +1385,8 @@ def _settings_view(settings: WorkspaceSettings) -> WorkspaceSettingsView:
             schedule_expression=settings.auto_scan.schedule_expression,
             workflow_description=settings.auto_scan.workflow_description,
         ),
+        jira=jira,
+        jira_configured=settings.jira is not None,
     )
 
 

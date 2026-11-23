@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import fcntl
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from urllib.request import Request
 from uuid import UUID, uuid4
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -203,11 +202,11 @@ def _service(
     )
 
 
-def _client(service: DashboardService) -> httpx.Client:
+def _client(service: DashboardService) -> TestClient:
     return TestClient(create_app(service))
 
 
-def _static_client(service: DashboardService, static_dir: Path) -> httpx.Client:
+def _static_client(service: DashboardService, static_dir: Path) -> TestClient:
     return TestClient(create_dashboard_app(service, static_dir=static_dir))
 
 
@@ -235,7 +234,7 @@ def test_skill_api_uses_workspace_scope_and_rejects_foreign_origin(tmp_path: Pat
     manager = FakeManager()
     service = _service(tmp_path, skill_manager=manager)
     client = _client(service)
-    client.base_url = httpx.URL("http://127.0.0.1:15778")
+    client.base_url = "http://127.0.0.1:15778"
     workspace = tmp_path / "workspace"
     workspace_id = client.post(
         "/api/workspaces/initialize", json={"path": str(workspace), "repositories": []}
@@ -298,7 +297,7 @@ def test_mcp_api_is_scoped_and_rejects_foreign_origins(tmp_path: Path) -> None:
     manager = FakeManager()
     service = _service(tmp_path, mcp_manager=manager)
     client = _client(service)
-    client.base_url = httpx.URL("http://127.0.0.1:15778")
+    client.base_url = "http://127.0.0.1:15778"
     workspace = tmp_path / "mcp-workspace"
     workspace_id = client.post(
         "/api/workspaces/initialize", json={"path": str(workspace), "repositories": []}
@@ -1245,6 +1244,22 @@ def test_settings_update_masks_webhook_and_test_does_not_persist_draft(
         "target_branch": "",
     }
 
+    jira = {"jira_site": "delivery.atlassian.net", "trigger_jql": "project = DELIVERY"}
+    jira_saved = client.put(
+        f"/api/workspaces/{workspace_id}/settings", json={"auto_delivery": jira}
+    )
+    assert jira_saved.status_code == 200
+    assert jira_saved.json() == {
+        **enabled.json(),
+        "jira": {"site": "delivery.atlassian.net", "project": "", "configured": False},
+        "auto_delivery": {**enabled.json()["auto_delivery"], **jira},
+    }
+    invalid = client.put(
+        f"/api/workspaces/{workspace_id}/settings", json={"auto_delivery": {"trigger_jql": ""}}
+    )
+    assert invalid.status_code == 422
+    assert client.get(f"/api/workspaces/{workspace_id}/settings").json() == jira_saved.json()
+
     tested = client.post(
         f"/api/workspaces/{workspace_id}/settings/feishu/test",
         json={"url": url},
@@ -1272,6 +1287,104 @@ def test_settings_update_masks_webhook_and_test_does_not_persist_draft(
         json={"feishu_webhook": {"enabled": False, "url": ""}},
     )
     assert cleared.json()["feishu_webhook"]["configured"] is False
+
+
+def test_shared_jira_settings_and_connection_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    client = _client(service)
+    workspace_id = UUID(
+        client.post(
+            "/api/workspaces/initialize",
+            json={"path": str(tmp_path / "workspace"), "repositories": []},
+        ).json()["workspace_id"]
+    )
+    before = service.settings_store.load(workspace_id)
+    delivery_query = 'status = "Ready for Dev"'
+    test_query = 'status = "Ready for QA"'
+    service.settings_store.save(
+        replace(
+            before,
+            auto_delivery=replace(
+                before.auto_delivery, jira_site="dev.atlassian.net", trigger_jql=delivery_query
+            ),
+            auto_test=before.auto_test.model_copy(
+                update={
+                    "jira_site": "qa.atlassian.net",
+                    "jira_project": "QA",
+                    "trigger_jql": test_query,
+                }
+            ),
+        )
+    )
+    endpoint = f"/api/workspaces/{workspace_id}/settings"
+    connection = {"site": "team.atlassian.net", "project": "TEAM"}
+    assert client.get(endpoint).json()["jira"] == {"site": "", "project": "", "configured": False}
+    snapshot = service.settings_store.raw_snapshot(workspace_id)
+    responses = iter(
+        (
+            (0, b'{"data":[{"key":"TEAM"}]}'),
+            (0, b'{"data":[{"key":"OLD"}]}'),
+            (1, b'{"error":{"code":"AUTH_INVALID","message":"private details"}}'),
+        )
+    )
+
+    async def read(
+        binary: str,
+        namespace: str,
+        *arguments: str,
+        site: str,
+        environment: Mapping[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        assert (binary, namespace, *arguments) == ("twg", "space", "get", "TEAM")
+        assert site == "team.atlassian.net" and environment is not None
+        assert environment["TWG_AGENT_DEFAULTS"] == "1"
+        return next(responses)
+
+    monkeypatch.setattr("lumon.tools.twg_jira.read_twg_jira", read)
+    probe = endpoint + "/jira/test"
+    assert client.post(probe, json={**connection, "project": "TEAM OR OTHER"}).status_code == 422
+    assert (
+        client.post(probe, json={**connection, "site": "https://team.atlassian.net"}).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            probe, json=connection, headers={"Origin": "https://unrelated.invalid"}
+        ).status_code
+        == 403
+    )
+    assert client.post(probe, json=connection).json()["success"] is True
+    assert client.post(probe, json=connection).json()["success"] is False
+    rejected = client.post(probe, json=connection).json()
+    assert rejected["success"] is False and "AUTH_INVALID" in rejected["detail"]
+    assert "private details" not in rejected["detail"]
+    assert service.settings_store.raw_snapshot(workspace_id) == snapshot
+
+    saved = client.put(endpoint, json={"jira": connection})
+    assert saved.status_code == 200
+    assert saved.json()["jira"] == {**connection, "configured": True}
+    stored = service.settings_store.load(workspace_id)
+    assert (stored.auto_delivery.jira_site, stored.auto_delivery.jira_project) == (
+        "team.atlassian.net",
+        "TEAM",
+    )
+    assert (stored.auto_test.jira_site, stored.auto_test.jira_project) == (
+        "team.atlassian.net",
+        "TEAM",
+    )
+    assert stored.auto_delivery.trigger_jql == delivery_query
+    assert stored.auto_test.trigger_jql == test_query
+    assert not stored.auto_delivery.enabled and not stored.auto_test.enabled
+    assert (
+        client.put(endpoint, json={"auto_delivery": {"jira_site": "old.atlassian.net"}}).status_code
+        == 422
+    )
+    tests = f"/api/workspaces/{workspace_id}/auto-test/settings"
+    assert client.put(tests, json={"jira_project": "ANOTHER"}).status_code == 422
+    assert client.put(tests, json={"trigger_jql": "status = 100"}).status_code == 200
+    assert client.get(endpoint).json()["jira"] == {**connection, "configured": True}
 
 
 @pytest.mark.parametrize("publish_mode", ["local", "branch", "pr", "direct"])
@@ -1819,7 +1932,7 @@ def test_scan_history_reconciles_abandoned_runs_without_inventing_elapsed_time(
 def test_scan_stop_api_is_workspace_scoped_and_reports_the_control_state(tmp_path: Path) -> None:
     service = _service(tmp_path)
     client = _client(service)
-    client.base_url = httpx.URL("http://127.0.0.1:15778")
+    client.base_url = "http://127.0.0.1:15778"
     workspace = tmp_path / "workspace"
     workspace_id = client.post(
         "/api/workspaces/initialize", json={"path": str(workspace), "repositories": []}

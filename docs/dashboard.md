@@ -329,12 +329,17 @@ than an arbitrary key-value editor.
 
 ## Auto Delivery
 
-The **Settings** page has a Workspace-scoped **Auto Delivery** panel with its own
-enable switch and Save button. It stores:
+Set the shared Jira Cloud site and exact project key in **Settings → Jira**.
+**Test connection** checks project access through the configured TWG CLI
+without saving the values. Saving the connection applies it to Auto Delivery
+and Auto Test. Existing profiles use their previous connections until the
+shared connection is saved.
 
-- a credential-free **Jira site** and **Trigger conditions (JQL)** that scope
-  eligible Stories, for example project, active sprint, Ready for Dev status and
-  the opt-in Flag. Use the actual status IDs behind the board column;
+The **Auto Delivery** panel has its own enable switch and Save button. Use it to
+configure the following fields.
+
+- **Trigger conditions (JQL)** that select Stories in the configured project.
+  Use the actual status IDs behind the board column.
 - a multiline **Execution prompt** (up to 8000 characters) describing delivery
   conditions and verification requirements. A Technical Plan is optional;
 - a five-field numeric cron **Schedule Expression** (the default is

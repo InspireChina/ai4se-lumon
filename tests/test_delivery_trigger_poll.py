@@ -16,7 +16,12 @@ from lumon.tools.jira_delivery import JiraDeliveryCandidate, JiraDeliveryTrigger
 from lumon.workspace.initializer import WorkspaceInitializer
 from lumon.workspace.model import InitRequest
 from lumon.workspace.registry import WorkspaceRegistry
-from lumon.workspace.settings import AutoDeliverySettings, WorkspaceSettings, WorkspaceSettingsStore
+from lumon.workspace.settings import (
+    AutoDeliverySettings,
+    JiraSettings,
+    WorkspaceSettings,
+    WorkspaceSettingsStore,
+)
 
 
 @pytest.fixture
@@ -48,7 +53,9 @@ def workspace(
     return root, workspace_id, store
 
 
-@pytest.mark.parametrize("detection", ["empty", "failed", "paused", "unconfigured"])
+@pytest.mark.parametrize(
+    "detection", ["empty", "failed", "paused", "unconfigured", "shared-project", "out-of-scope"]
+)
 def test_detection_does_not_start_codex(
     workspace: tuple[Path, UUID, WorkspaceSettingsStore],
     monkeypatch: pytest.MonkeyPatch,
@@ -56,6 +63,16 @@ def test_detection_does_not_start_codex(
     detection: str,
 ) -> None:
     root, workspace_id, store = workspace
+    if detection in {"shared-project", "out-of-scope"}:
+        profile = store.load(workspace_id).with_jira(JiraSettings("shared.atlassian.net", "EXACT"))
+        store.save(
+            replace(
+                profile,
+                auto_delivery=replace(
+                    profile.auto_delivery, trigger_jql="status = 1 OR status = 2 ORDER BY Rank ASC"
+                ),
+            )
+        )
     if detection == "unconfigured":
         store.save(
             WorkspaceSettings(workspace_id, auto_delivery=AutoDeliverySettings(enabled=True))
@@ -69,8 +86,19 @@ def test_detection_does_not_start_codex(
             *,
             excluded_keys: frozenset[str],
         ) -> JiraDeliveryCandidate | None:
-            assert jira_site == "test.atlassian.net" and trigger_jql == "project = TEST"
+            if detection in {"shared-project", "out-of-scope"}:
+                assert jira_site == "shared.atlassian.net"
+                assert (
+                    trigger_jql
+                    == "(status = 1 OR status = 2) AND project = EXACT ORDER BY Rank ASC"
+                )
+            else:
+                assert jira_site == "test.atlassian.net" and trigger_jql == "project = TEST"
             assert not excluded_keys
+            if detection == "out-of-scope":
+                return JiraDeliveryCandidate(
+                    "OTHER-1", "Other project", "https://shared.atlassian.net/browse/OTHER-1"
+                )
             if detection == "failed":
                 raise PreflightError("Jira detection failed; Codex was not started.")
             if detection == "paused":
@@ -91,7 +119,7 @@ def test_detection_does_not_start_codex(
     assert poll.finished_at is not None
     assert poll.duration_seconds is not None
     assert DeliveryRunStore().list(root) == ()
-    if detection == "empty":
+    if detection in {"empty", "shared-project"}:
         assert exit_code == 0 and poll.state == "idle"
         assert '"status": "idle"' in output.out
         assert "Codex was not started" in DeliveryRunStore().activity(root, poll.run_id)[0].detail

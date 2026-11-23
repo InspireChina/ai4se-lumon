@@ -11,6 +11,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from lumon.errors import PreflightError
+from lumon.tools.twg_jira import read_twg_jira
 from lumon.workspace.settings import validate_delivery_jira_site, validate_delivery_jql
 
 
@@ -86,17 +87,32 @@ class _HistoryResponse(BaseModel):
     errors: list[object] = Field(default_factory=list[object], max_length=0)
 
 
-def _exclude_claimed(jql: str, keys: frozenset[str]) -> str:
-    if not keys:
-        return jql
-    if any(not re.fullmatch(r"[A-Z][A-Z0-9_]*-[1-9][0-9]*", key) for key in keys):
-        raise ValueError("Invalid receipt key")
+def split_jql(jql: str) -> tuple[str, str]:
+    """Split the predicate from its sort, ignoring ORDER BY inside quoted values."""
+
     # Ignore ORDER BY inside quoted JQL values, including escaped quotes.
     tokens = re.finditer(
         r"'[^'\\]*(?:\\.[^'\\]*)*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\border\s+by\b", jql, re.I
     )
     order = next((token.start() for token in tokens if token.group()[0] not in "'\""), len(jql))
-    clause, sorting = jql[:order].strip(), jql[order:]
+    return jql[:order].strip(), jql[order:]
+
+
+def scope_delivery_query(jql: str, project: str) -> str:
+    if not jql or not project:
+        return jql
+    predicate, sort = split_jql(jql)
+    if not predicate:
+        raise PreflightError("Auto Delivery needs a Jira trigger predicate.")
+    return f"({predicate}) AND project = {project} {sort}".strip()
+
+
+def _exclude_claimed(jql: str, keys: frozenset[str]) -> str:
+    if not keys:
+        return jql
+    if any(not re.fullmatch(r"[A-Z][A-Z0-9_]*-[1-9][0-9]*", key) for key in keys):
+        raise ValueError("Invalid receipt key")
+    clause, sorting = split_jql(jql)
     excluded = ", ".join(sorted(keys))
     return validate_delivery_jql(f"({clause}) AND key NOT IN ({excluded}) {sorting}".strip())
 
@@ -249,41 +265,12 @@ class JiraDeliveryTrigger:
         raise ValueError("Jira status history exceeds the detection limit.")
 
     async def _read(self, *arguments: str, site: str) -> bytes:
-        # TWG strips pagination metadata; server-side receipt exclusion needs only one result.
-        process = await asyncio.create_subprocess_exec(
-            self.binary,
-            "jira",
-            "workitem",
-            *arguments,
-            "--site",
-            site,
-            "--output",
-            "json",
-            "--output-summary",
-            "none",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=self.environment,
+        code, payload = await read_twg_jira(
+            self.binary, "workitem", *arguments, site=site, environment=self.environment
         )
-        try:
-            assert process.stdout is not None
-            payload = bytearray()
-            while chunk := await process.stdout.read(64 * 1024):
-                payload.extend(chunk)
-                if len(payload) > 1024 * 1024:
-                    raise ValueError("Jira response is too large.")
-            await process.wait()
-            if process.returncode != 0:
-                raise PreflightError(
-                    "Jira detection failed. Check TWG access and the trigger JQL; "
-                    "Codex was not started."
-                )
-            return bytes(payload)
-        finally:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            await process.wait()
+        if code:
+            raise PreflightError(
+                "Jira detection failed. Check TWG access and the trigger JQL; "
+                "Codex was not started."
+            )
+        return payload

@@ -52,6 +52,9 @@ from lumon.dashboard.schemas import (
     HealthResponse,
     InitializeWorkspaceRequest,
     InitializeWorkspaceResponse,
+    JiraSettingsRequest,
+    JiraSettingsResponse,
+    JiraTestResponse,
     McpCreateRequest,
     McpDiscoveryResponse,
     McpInventoryResponse,
@@ -108,6 +111,7 @@ from lumon.tools.github_repositories import (
 )
 from lumon.tools.github_repositories import repository_branches as source_repository_branches
 from lumon.visual.environment import EnvironmentSnapshot
+from lumon.workspace.settings import validate_jira_settings
 
 # Route functions are consumed by FastAPI's runtime decorators.
 # pyright cannot observe that registration and reports them as unused otherwise.
@@ -118,6 +122,8 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
     """Create a fresh FastAPI application with an isolated Dashboard service."""
 
     dashboard_service = service or DashboardService()
+    from lumon.auto_test.service import AutoTestService
+    from lumon.dashboard.auto_test_routes import add_auto_test_routes
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -776,11 +782,15 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
         update = payload.feishu_webhook
         auto_delivery = payload.auto_delivery
         auto_scan = payload.auto_scan
+        jira = None
+        if payload.jira is not None:
+            _require_local_origin(request)
+            jira = validate_jira_settings(payload.jira.site, payload.jira.project)
         settings = _service(request).update_settings(
             workspace_id,
-            enabled=update.enabled,
-            url_provided="url" in update.model_fields_set,
-            url=update.url,
+            enabled=update.enabled if update is not None else None,
+            url_provided=update is not None and "url" in update.model_fields_set,
+            url=update.url if update is not None else None,
             auto_delivery_enabled=(auto_delivery.enabled if auto_delivery is not None else None),
             auto_delivery_trigger_hooks=(
                 tuple(auto_delivery.trigger_hooks)
@@ -815,8 +825,18 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
             auto_scan_workflow_description=(
                 auto_scan.workflow_description if auto_scan is not None else None
             ),
+            jira=jira,
         )
         return _settings_response(settings)
+
+    @router.post("/workspaces/{workspace_id}/settings/jira/test")
+    async def test_jira_connection(
+        request: Request, workspace_id: UUID, payload: JiraSettingsRequest
+    ) -> JiraTestResponse:
+        _require_local_origin(request)
+        jira = validate_jira_settings(payload.site, payload.project)
+        result = await _service(request).test_jira_connection(workspace_id, jira)
+        return JiraTestResponse(success=result.success, detail=result.detail)
 
     @router.post(
         "/workspaces/{workspace_id}/settings/feishu/test",
@@ -834,6 +854,11 @@ def create_app(service: DashboardService | None = None) -> FastAPI:
         )
         return WebhookTestResponse(success=result.success, detail=result.detail)
 
+    add_auto_test_routes(
+        router,
+        AutoTestService(dashboard_service.registry, dashboard_service.settings_store),
+        _require_local_origin,
+    )
     app.include_router(router)
     app.add_exception_handler(WorkspaceNotFoundError, cast(Any, _not_found_handler))
     app.add_exception_handler(LumonError, cast(Any, _lumon_error_handler))
@@ -864,6 +889,11 @@ def _settings_response(settings: WorkspaceSettingsView) -> WorkspaceSettingsResp
     webhook = settings.feishu_webhook
     return WorkspaceSettingsResponse(
         workspace_id=settings.workspace_id,
+        jira=JiraSettingsResponse(
+            site=settings.jira.site,
+            project=settings.jira.project,
+            configured=settings.jira_configured,
+        ),
         feishu_webhook=FeishuWebhookResponse(
             enabled=webhook.enabled,
             configured=webhook.configured,

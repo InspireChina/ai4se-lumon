@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { I18nProvider } from "../shared/i18n";
-import type { AgentSettings, FlowDocument, WorkspaceListItem, WorkspaceSettings } from "../shared/types";
+import type { AgentSettings, AutoTestRun, AutoTestSettings, FlowDocument, WorkspaceListItem, WorkspaceSettings } from "../shared/types";
 import { ApiError, dashboardApi } from "./api";
 import { App } from "./App";
 
@@ -21,6 +21,10 @@ const settings: WorkspaceSettings = {
   workspace_id: "workspace-one", feishu_webhook: { enabled: true, configured: true, masked_url: "https://example.test/…1234" },
   auto_delivery: { enabled: false, trigger_hooks: [], schedule_expression: "", jira_site: "", trigger_jql: "", publish_mode: "local", target_branch: "" },
   auto_scan: { enabled: false, lookback_days: 7, trigger_hooks: [], schedule_expression: "", workflow_description: "" },
+};
+const testSettings: AutoTestSettings = {
+  enabled: false, schedule_expression: "*/5 * * * *", jira_site: "example.atlassian.net",
+  jira_project: "TEST", trigger_jql: 'project = TEST AND status = "Ready For QA"', model: "gpt-test",
 };
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); window.history.replaceState(null, "", "/"); });
@@ -65,6 +69,7 @@ it("merges history into Agent, moves global configuration to Settings and protec
     workspace_id: workspaceId, name: workspaceId, path: "/test", created_at: "2026-09-30T04:00:00Z", lumon_version: "1.4.9", repositories: [], workflow_schedules: [],
   }));
   vi.spyOn(dashboardApi, "listConversations").mockResolvedValue({ items: [], total: 0 });
+  vi.spyOn(dashboardApi, "autoTestSettings").mockResolvedValue(testSettings);
   const saveAgent = vi.spyOn(dashboardApi, "updateAgentSettings").mockImplementation(async (update) => ({
     ...agent, agent_model: update.agent_model, observability: { ...agent.observability, ...update.observability },
   }));
@@ -93,7 +98,8 @@ it("merges history into Agent, moves global configuration to Settings and protec
     expect(container.querySelectorAll("h1")).toHaveLength(1);
     expect(container.querySelector("h1")?.textContent).toBe("Agent");
     expect(container.querySelector("#agent-model")).toBeNull();
-    expect(container.querySelectorAll(".side-nav button")).toHaveLength(9);
+    expect(container.querySelectorAll(".side-nav button")).toHaveLength(10);
+    expect(navigation("Auto Test")).not.toBeNull();
     expect(navigation("Skills")).not.toBeNull();
     expect(container.querySelector(".side-nav")?.textContent).not.toContain("Conversation history");
 
@@ -105,7 +111,7 @@ it("merges history into Agent, moves global configuration to Settings and protec
     expect(container.querySelector(".settings-panel .status-pill")).toBeNull();
     expect(container.textContent).not.toContain("Global Agent settings");
     expect(container.textContent).not.toContain("Applies to the local Agent across all Workspaces.");
-    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(5);
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(6);
     expect(container.querySelector("#auto-delivery-hooks")).not.toBeNull();
     expect(container.querySelector("#auto-scan-lookback")).not.toBeNull();
     expect(container.querySelector("#auto-scan-hooks")).not.toBeNull();
@@ -157,7 +163,10 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   localStorage.setItem("lumon.locale", locale);
   window.history.replaceState(null, "", "?workspace=workspace-one&view=settings");
-  let persisted = structuredClone(settings);
+  let persisted: WorkspaceSettings = {
+    ...structuredClone(settings),
+    jira: { site: "example.atlassian.net", project: "TEST", configured: false },
+  };
   vi.spyOn(dashboardApi, "listWorkspaces").mockResolvedValue(workspaces);
   vi.spyOn(dashboardApi, "getBootstrap").mockResolvedValue({ version: "1.4.17", workspace_count: 2, has_workspaces: true });
   vi.spyOn(dashboardApi, "getAgentSettings").mockResolvedValue(agent);
@@ -166,10 +175,33 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
   vi.spyOn(dashboardApi, "getCodexCliStatus").mockResolvedValue({ status: "up_to_date", binary_path: "/test/codex", installed_version: "0.160.0", latest_version: "0.160.0" });
   vi.spyOn(dashboardApi, "getDeliveryHistory").mockResolvedValue({ runs: [], polls: [] });
   vi.spyOn(dashboardApi, "listScans").mockResolvedValue([]);
+  let savedTestSettings = testSettings;
+  vi.spyOn(dashboardApi, "autoTestSettings").mockImplementation(async () => savedTestSettings);
+  const saveTest = vi.spyOn(dashboardApi, "saveAutoTestSettings").mockImplementation(async (_id, update) => {
+    savedTestSettings = { ...savedTestSettings, ...update };
+    return savedTestSettings;
+  });
+  const testJira = vi.spyOn(dashboardApi, "testJira").mockResolvedValue({ success: true, detail: "Connected to Jira project QA." });
+  const latestRun: AutoTestRun = {
+    run_id: "current", issue_key: "TEST-2", issue_title: "Checkout draft", jira_site: "example.atlassian.net",
+    started_at: "2026-11-20T04:00:00Z", status: "completed", phase: "finished", detail: "",
+    stopping: false, publishable: true, counts: { passed: 1 },
+    artifacts: [{ filename: "draft.xlsx", kind: "workbook", case_id: null, platform: null, attempt: null }],
+    jira: { status: "published", detail: "", comment_id: "100" },
+  };
+  vi.spyOn(dashboardApi, "autoTestHistory").mockResolvedValue({
+    starting: false, poll: null,
+    runs: [latestRun, { ...latestRun, run_id: "older", issue_key: "TEST-1", issue_title: "Edit profile", artifacts: [] }],
+  });
   const save = vi.spyOn(dashboardApi, "updateSettings").mockImplementation(async (_id, update) => {
+    if (update.jira) {
+      persisted.jira = { ...update.jira, configured: true };
+      persisted.auto_delivery.jira_site = update.jira.site;
+      savedTestSettings = { ...savedTestSettings, jira_site: update.jira.site, jira_project: update.jira.project };
+    }
     persisted = {
       ...persisted,
-      feishu_webhook: { ...persisted.feishu_webhook, enabled: update.feishu_webhook.enabled },
+      feishu_webhook: { ...persisted.feishu_webhook, enabled: update.feishu_webhook?.enabled ?? persisted.feishu_webhook.enabled },
       auto_delivery: { ...persisted.auto_delivery, ...update.auto_delivery },
       auto_scan: { ...persisted.auto_scan, ...update.auto_scan },
     };
@@ -190,6 +222,11 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
   async function click(selector: string): Promise<void> {
     await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
   }
+  async function submit(selector: string): Promise<void> {
+    const form = container.querySelector<HTMLFormElement>(selector)!;
+    expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(false);
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  }
   try {
     await act(async () => root.render(<I18nProvider><App /></I18nProvider>));
     await edit("#auto-delivery-hooks", "Check approved Stories.\n\nVerify before delivery.");
@@ -200,7 +237,7 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
     expect(container.querySelector(".notice-success > span")?.textContent).not.toMatch(/[.。]$/u);
     expect(container.querySelector(".notice-success > span")?.textContent).toBeTruthy();
     expect(save.mock.calls[0][1].auto_scan).toBeUndefined();
-    expect(save.mock.calls[0][1].feishu_webhook.url).toBeUndefined();
+    expect(save.mock.calls[0][1].feishu_webhook).toBeUndefined();
     expect(field("#auto-scan-lookback").value).toBe("21");
     expect(field("#auto-scan-hooks").value).toBe("Create verified Bugs.\n\nReuse duplicates.");
     expect(field("#feishu-webhook-url").value).toBe("https://example.test/replacement");
@@ -214,7 +251,7 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
     await click('.side-nav button[aria-label="Auto Scan"]');
     expect(confirm).toHaveBeenCalledTimes(2);
     await click(".settings-panel:not(.auto-delivery-settings-panel):not(.auto-scan-settings-panel) .settings-actions .button-primary");
-    expect(save.mock.calls[2][1].feishu_webhook.url).toBe("https://example.test/replacement");
+    expect(save.mock.calls[2][1].feishu_webhook?.url).toBe("https://example.test/replacement");
     await click('.side-nav button[aria-label="Auto Delivery"]');
     expect(window.location.search).toContain("view=auto-delivery");
     expect(container.querySelector(".settings-panel")).toBeNull();
@@ -222,6 +259,71 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
     await click('.side-nav button[aria-label="Auto Scan"]');
     expect(container.querySelector(".settings-panel")).toBeNull();
     expect(container.querySelector(".scan-history-panel")).not.toBeNull();
+    await click('.side-nav button[aria-label="Auto Test"]');
+    expect(container.querySelector("#auto-test-settings")).toBeNull();
+    expect(container.querySelector(".auto-test-history tbody")?.children).toHaveLength(2);
+    expect(container.querySelector("#auto-test-run-title")).toBeNull();
+    await click("#auto-test-open-current");
+    expect(container.querySelector("#auto-test-run-title")?.textContent).toBe("Checkout draft");
+    expect(container.querySelector('.auto-test-evidence a[href$="/draft.xlsx"]')).not.toBeNull();
+    expect(container.querySelector(".auto-test-history")).toBeNull();
+    await click(".auto-test-back");
+    await click("#auto-test-open-older");
+    expect(container.querySelector("#auto-test-run-title")?.textContent).toBe("Edit profile");
+    await click(".auto-test-back");
+    await click(".auto-test-toolbar .button-secondary");
+    expect(window.location.search).toContain("view=settings");
+    const jira = ".jira-settings-panel";
+    expect(container.querySelector(`${jira} h2`)?.textContent).toBe("Jira");
+    expect(container.querySelectorAll(`${jira} input`)).toHaveLength(2);
+    expect(container.querySelector(`${jira} textarea`)).toBeNull();
+    expect(container.querySelector(".auto-delivery-settings-panel #auto-delivery-jql")).not.toBeNull();
+    expect(container.querySelector("#auto-test-settings #auto-test-jql")).not.toBeNull();
+    expect(field("#auto-test-jql").value).toBe(testSettings.trigger_jql);
+    expect(field("#jira-project").value).toBe("TEST");
+    const jqlHelp = document.querySelector("#auto-delivery-jql-help")!.textContent!;
+    const jqlUsage = {
+      en: ["Jira Query Language (JQL)", "scheduled check", "configured Jira site", "Existing receipts", "at most one card", "no Agent run", "ORDER BY", "newer move", "status =", "Completed"],
+      "zh-CN": ["Jira 查询语言（JQL）", "每次定时检查", "已配置的 Jira 站点", "交付记录", "最多启动一张", "不启动 Agent", "ORDER BY", "重新移入", "status =", "Completed"],
+      "zh-TW": ["Jira 查詢語言（JQL）", "每次排程檢查", "已設定的 Jira 站點", "交付紀錄", "最多啟動一張", "不啟動 Agent", "ORDER BY", "重新移入", "status =", "Completed"],
+    };
+    for (const explanation of jqlUsage[locale]) expect(jqlHelp).toContain(explanation);
+
+    await edit("#jira-site", "qa.atlassian.net");
+    await edit("#jira-project", "QA");
+    await edit("#auto-delivery-jql", 'status = "Ready for Dev"');
+    await edit("#auto-delivery-hooks", "Verify release evidence.");
+    await edit("#auto-test-jql", 'status = "Ready for Test"');
+    await edit('#auto-test-settings input[name="model"]', "gpt-new");
+    await click('.side-nav button[aria-label="Auto Test"]');
+    expect(confirm).toHaveBeenCalledTimes(3);
+
+    await click(`${jira} button[type="button"]`);
+    expect(testJira).toHaveBeenCalledWith("workspace-one", { site: "qa.atlassian.net", project: "QA" });
+    expect(container.querySelector(`${jira} [role="status"]`)?.textContent).toBe("Connected to Jira project QA.");
+    expect(save).toHaveBeenCalledTimes(3);
+    expect(saveTest).not.toHaveBeenCalled();
+    await submit(`${jira} form`);
+    expect(save).toHaveBeenLastCalledWith("workspace-one", {
+      jira: { site: "qa.atlassian.net", project: "QA" },
+    });
+    expect(field("#auto-delivery-hooks").value).toBe("Verify release evidence.");
+    expect(field("#auto-delivery-jql").value).toBe('status = "Ready for Dev"');
+    expect(field("#auto-test-jql").value).toBe('status = "Ready for Test"');
+    expect(saveTest).not.toHaveBeenCalled();
+    expect(savedTestSettings.model).toBe(testSettings.model);
+    expect(field('#auto-test-settings input[name="model"]').value).toBe("gpt-new");
+    await submit("#auto-test-settings form");
+    expect(saveTest).toHaveBeenLastCalledWith("workspace-one", {
+      enabled: false, schedule_expression: testSettings.schedule_expression, model: "gpt-new",
+      trigger_jql: 'status = "Ready for Test"',
+    });
+    expect(savedTestSettings.jira_project).toBe("QA");
+    await click(".auto-delivery-settings-panel .settings-actions button");
+    expect(persisted.auto_delivery.trigger_jql).toBe('status = "Ready for Dev"');
+    expect(persisted.auto_delivery.jira_site).toBe("qa.atlassian.net");
+    await click('.side-nav button[aria-label="Auto Test"]');
+    expect(container.querySelector("#auto-test-settings")).toBeNull();
   } finally {
     await act(async () => root.unmount());
   }

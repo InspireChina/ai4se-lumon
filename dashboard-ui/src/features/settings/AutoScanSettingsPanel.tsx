@@ -53,12 +53,9 @@ export function AutoScanSettingsPanel({ settings, onSave, onDirtyChange }: {
     <div className="panel-heading">
       <div className="settings-title">
         <span className="workspace-glyph glyph-amber"><ScanSearch size={18} /></span>
-        <div>
-          <p className="eyebrow">{t("settings.automation")}</p>
-          <div className="field-label-heading">
-            <h2>{t("settings.autoScan")}</h2>
-            <HelpTooltip helpId="auto-scan-overview-help" label={t("settings.autoScan")} help={t("settings.autoScanDescription")} />
-          </div>
+        <div className="field-label-heading">
+          <h2>{t("settings.autoScan")}</h2>
+          <HelpTooltip helpId="auto-scan-overview-help" label={t("settings.autoScan")} help={t("settings.autoScanDescription")} />
         </div>
       </div>
       <div className="settings-heading-actions">

@@ -22,7 +22,6 @@ export function AutoDeliverySettingsPanel({
   const [scheduleExpression, setScheduleExpression] = useState(
     settings.auto_delivery.schedule_expression,
   );
-  const [jiraSite, setJiraSite] = useState(settings.auto_delivery.jira_site);
   const [triggerJql, setTriggerJql] = useState(settings.auto_delivery.trigger_jql);
   const [publishMode, setPublishMode] = useState(settings.auto_delivery.publish_mode);
   const [targetBranch, setTargetBranch] = useState(settings.auto_delivery.target_branch);
@@ -32,7 +31,6 @@ export function AutoDeliverySettingsPanel({
     setEnabled(settings.auto_delivery.enabled);
     setTriggerHooks(savedHooks);
     setScheduleExpression(settings.auto_delivery.schedule_expression);
-    setJiraSite(settings.auto_delivery.jira_site);
     setTriggerJql(settings.auto_delivery.trigger_jql);
     setPublishMode(settings.auto_delivery.publish_mode);
     setTargetBranch(settings.auto_delivery.target_branch);
@@ -41,7 +39,6 @@ export function AutoDeliverySettingsPanel({
     settings.auto_delivery.enabled,
     savedHooks,
     settings.auto_delivery.schedule_expression,
-    settings.auto_delivery.jira_site,
     settings.auto_delivery.trigger_jql,
     settings.auto_delivery.publish_mode,
     settings.auto_delivery.target_branch,
@@ -50,11 +47,12 @@ export function AutoDeliverySettingsPanel({
   const hasChanges = enabled !== settings.auto_delivery.enabled
     || triggerHooks !== savedHooks
     || scheduleExpression !== settings.auto_delivery.schedule_expression
-    || jiraSite !== settings.auto_delivery.jira_site
     || triggerJql !== settings.auto_delivery.trigger_jql
     || publishMode !== settings.auto_delivery.publish_mode
     || targetBranch !== settings.auto_delivery.target_branch;
-  const missingTrigger = enabled && (!jiraSite.trim() || !triggerJql.trim() || !triggerHooks.trim());
+  const missingTrigger = enabled && (
+    !settings.auto_delivery.jira_site.trim() || !triggerJql.trim() || !triggerHooks.trim()
+  );
 
   useEffect(() => { onDirtyChange(hasChanges); }, [hasChanges, onDirtyChange]);
 
@@ -62,12 +60,10 @@ export function AutoDeliverySettingsPanel({
     setSaving(true);
     try {
       const saved = await onSave({
-        feishu_webhook: { enabled: settings.feishu_webhook.enabled },
         auto_delivery: {
           enabled,
           trigger_hooks: triggerHooks.trim() ? [triggerHooks.trim()] : [],
           schedule_expression: scheduleExpression.trim(),
-          jira_site: jiraSite.trim(),
           trigger_jql: triggerJql.trim(),
           publish_mode: publishMode,
           target_branch: targetBranch.trim(),
@@ -84,10 +80,7 @@ export function AutoDeliverySettingsPanel({
       <div className="panel-heading">
         <div className="settings-title">
           <span className="workspace-glyph glyph-rose"><Rocket size={18} /></span>
-          <div>
-            <p className="eyebrow">{t("settings.automation")}</p>
-            <h2>{t("settings.autoDelivery")}</h2>
-          </div>
+          <h2>{t("settings.autoDelivery")}</h2>
         </div>
         <div className="settings-heading-actions">
           {hasChanges && <span className="unsaved-label">{t("settings.unsaved")}</span>}
@@ -118,33 +111,13 @@ export function AutoDeliverySettingsPanel({
               onChange={(event) => setScheduleExpression(event.target.value)}
             />
           </div>
-          <div>
-            <label className="field-label" htmlFor="auto-delivery-jira-site">{t("settings.autoDeliveryJiraSite")}</label>
-            <input
-              id="auto-delivery-jira-site"
-              className="text-input"
-              value={jiraSite}
-              maxLength={253}
-              placeholder="team.atlassian.net"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              onChange={(event) => setJiraSite(event.target.value)}
-            />
-          </div>
           <div className="field-full">
             <FieldLabelWithHelp htmlFor="auto-delivery-jql" helpId="auto-delivery-jql-help"
-              label={t("settings.autoDeliveryJql")} help={t("settings.autoDeliveryJqlHelp")} />
-            <textarea
-              id="auto-delivery-jql"
-              className="text-input text-area mono"
-              rows={3}
-              maxLength={8000}
-              value={triggerJql}
-              aria-describedby="auto-delivery-jql-help"
-              placeholder={'project = TEAM AND issuetype = Story AND sprint in openSprints() AND status = "To Do" AND Flagged = Impediment ORDER BY updated ASC'}
-              onChange={(event) => setTriggerJql(event.target.value)}
-            />
+              label={t("settings.jiraQuery")} help={t("settings.autoDeliveryJqlHelp")} />
+            <textarea id="auto-delivery-jql" className="text-input text-area mono" rows={5}
+              maxLength={8000} spellCheck={false} value={triggerJql} aria-describedby="auto-delivery-jql-help"
+              placeholder={'sprint in openSprints() AND status = "To Do" AND Flagged = Impediment ORDER BY Rank ASC'}
+              onChange={(event) => setTriggerJql(event.target.value)} />
           </div>
           <div>
             <FieldLabelWithHelp htmlFor="auto-delivery-publish-mode" helpId="auto-delivery-publish-help"

@@ -1,6 +1,48 @@
 export type WorkspaceHealth = "ready" | "missing" | "invalid";
 
-export type View = "overview" | "settings" | "repositories" | "agent" | "auto-delivery" | "auto-scan" | "flows" | "capabilities" | "skills";
+export type View = "overview" | "settings" | "repositories" | "agent" | "auto-delivery" | "auto-scan" | "auto-test" | "flows" | "capabilities" | "skills";
+
+export interface AutoTestSettings {
+  enabled: boolean;
+  schedule_expression: string;
+  jira_site: string;
+  jira_project: string;
+  trigger_jql: string;
+  model: string;
+}
+
+export interface AutoTestRun {
+  run_id: string;
+  issue_key: string;
+  issue_title: string;
+  jira_site: string;
+  started_at: string;
+  status: "running" | "completed" | "blocked" | "stopped" | "interrupted";
+  phase: string;
+  detail: string;
+  stopping: boolean;
+  publishable: boolean;
+  counts: Partial<Record<"passed" | "failed" | "review" | "blocked" | "not_run", number>>;
+  artifacts: {
+    filename: string;
+    kind: "workbook" | "screenshot" | "video";
+    case_id: string | null;
+    platform: "web" | "ios" | null;
+    attempt: number | null;
+  }[];
+  jira: { status: "pending" | "published" | "partial" | "failed"; detail: string; comment_id: string | null };
+}
+
+export interface AutoTestWorkbookSheet {
+  name: string;
+  rows: string[][];
+}
+
+export interface AutoTestHistory {
+  runs: AutoTestRun[];
+  poll: { status: string; detail: string; checked_at: string } | null;
+  starting: boolean;
+}
 
 export interface WorkspaceSkill {
   id: string;
@@ -203,11 +245,17 @@ export interface AutoScanSettings {
   workflow_description: string;
 }
 
+export interface JiraSettings {
+  site: string;
+  project: string;
+}
+
 export interface WorkspaceSettings {
   workspace_id: string;
   feishu_webhook: FeishuWebhookSettings;
   auto_delivery: AutoDeliverySettings;
   auto_scan: AutoScanSettings;
+  jira?: JiraSettings & { configured: boolean };
 }
 
 export interface FlowSummary {
@@ -264,12 +312,13 @@ export interface AgentSettings {
 }
 
 export interface SettingsUpdate {
-  feishu_webhook: {
+  jira?: JiraSettings;
+  feishu_webhook?: {
     enabled: boolean;
     url?: string;
   };
   auto_delivery?: {
-    enabled: boolean;
+    enabled?: boolean;
     trigger_hooks?: string[];
     schedule_expression?: string;
     jira_site?: string;

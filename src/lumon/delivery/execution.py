@@ -30,7 +30,11 @@ from lumon.delivery.service import DeliveryService
 from lumon.delivery.store import DeliveryRunStore
 from lumon.errors import AgentRuntimeError, LumonError, PreflightError
 from lumon.observability import redact_text
-from lumon.tools.jira_delivery import JiraDeliveryCandidate, JiraDeliveryTrigger
+from lumon.tools.jira_delivery import (
+    JiraDeliveryCandidate,
+    JiraDeliveryTrigger,
+    scope_delivery_query,
+)
 from lumon.workspace.config import load_workspace_config
 from lumon.workspace.registry import UserStateLayout, WorkspaceRegistry
 from lumon.workspace.settings import AutoDeliverySettings, WorkspaceSettingsStore
@@ -391,23 +395,27 @@ async def _select_delivery(
     service: DeliveryService,
     resume_run: DeliveryRun | None,
 ) -> tuple[JiraDeliveryCandidate | None, DeliveryRun | None]:
-    excluded_keys = frozenset(
-        run.story_key.upper()
+    prior = tuple(
+        run
         for run in service.run_store.list(workspace)
-        if run.workspace_id in (None, workspace_id)
+        if run.workspace_id in (None, workspace_id) and _matches_jira_scope(run, settings)
     )
+    if resume_run and not _matches_jira_scope(resume_run, settings):
+        raise PreflightError("This Delivery belongs to a different Jira site or project.")
+    excluded_keys = frozenset(run.story_key.upper() for run in prior)
+    trigger_jql = scope_delivery_query(settings.trigger_jql, settings.jira_project)
     candidate = (
         JiraDeliveryCandidate(
             resume_run.story_key, resume_run.story_title, resume_run.jira_url or ""
         )
         if resume_run
         else await JiraDeliveryTrigger().find_candidate(
-            settings.jira_site, settings.trigger_jql, excluded_keys=excluded_keys
+            settings.jira_site, trigger_jql, excluded_keys=excluded_keys
         )
     )
     if candidate is None:
-        for previous in service.run_store.list(workspace):
-            if previous.workspace_id not in {None, workspace_id} or previous.finished_at is None:
+        for previous in prior:
+            if previous.finished_at is None:
                 continue
             if previous.state not in {
                 DeliveryState.FAILED,
@@ -417,7 +425,7 @@ async def _select_delivery(
                 continue
             candidate = await JiraDeliveryTrigger().reentered(
                 settings.jira_site,
-                settings.trigger_jql,
+                trigger_jql,
                 previous.story_key,
                 finished_at=previous.finished_at,
                 consumed_event_id=previous.jira_reentry_id,
@@ -435,14 +443,25 @@ async def _select_delivery(
                     reentry_id=candidate.reentry_id,
                 )
                 break
-    if (
-        candidate is not None
-        and service.settings_store.load(workspace_id).auto_delivery != settings
-    ):
-        raise PreflightError(
-            "Auto Delivery settings changed during detection; Codex was not started."
-        )
+    if candidate is not None:
+        if settings.jira_project and not candidate.key.startswith(settings.jira_project + "-"):
+            raise PreflightError(
+                "Jira returned a Delivery candidate outside the configured project."
+            )
+        if service.settings_store.load(workspace_id).auto_delivery != settings:
+            raise PreflightError(
+                "Auto Delivery settings changed during detection; Codex was not started."
+            )
     return candidate, resume_run
+
+
+def _matches_jira_scope(run: DeliveryRun, settings: AutoDeliverySettings) -> bool:
+    if not settings.jira_project:
+        return True
+    return (
+        run.story_key.startswith(settings.jira_project + "-")
+        and run.jira_url == f"https://{settings.jira_site}/browse/{run.story_key}"
+    )
 
 
 def _resume_prompt(run: DeliveryRun | None) -> str:
@@ -532,7 +551,7 @@ def _scheduled_poll_prompt(
             {"key": candidate.key, "title": candidate.title, "url": candidate.url}
         ),
         jira_site=settings.jira_site,
-        trigger_jql=json.dumps(settings.trigger_jql),
+        trigger_jql=json.dumps(scope_delivery_query(settings.trigger_jql, settings.jira_project)),
         publish_mode=settings.publish_mode,
         target_branch=json.dumps(settings.target_branch)
         if settings.target_branch

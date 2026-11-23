@@ -7,7 +7,6 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -137,13 +136,13 @@ def test_source_listing_does_not_hide_setup_failures(
 
 
 @pytest.fixture
-def client(tmp_path: Path, commands: Commands) -> Iterator[httpx.Client]:
+def client(tmp_path: Path, commands: Commands) -> Iterator[TestClient]:
     service = DashboardService(state_root=tmp_path, setup_inspector=SetupInspector(commands.run))
     with TestClient(create_app(service)) as session:
         yield session
 
 
-def test_setup_api_distinguishes_tools_from_agent_configuration(client: httpx.Client) -> None:
+def test_setup_api_distinguishes_tools_from_agent_configuration(client: TestClient) -> None:
     response = client.get("/api/setup")
     assert response.status_code == 200
     assert response.json()["ready"] is True
