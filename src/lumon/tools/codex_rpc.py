@@ -10,13 +10,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
+from lumon.tools.codex import is_missing_session_error
+
 
 class CodexRpcError(Exception):
     """Provider error; deliberately excludes arbitrary server text and credentials."""
 
-    def __init__(self, code: int | None = None) -> None:
+    def __init__(self, code: int | None = None, *, session_unavailable: bool = False) -> None:
         super().__init__("Codex app-server request failed.")
         self.code = code
+        self.session_unavailable = session_unavailable
 
 
 class CodexRpc:
@@ -25,7 +28,7 @@ class CodexRpc:
         self.process: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._stderr: asyncio.Task[None] | None = None
-        self._pending: dict[int, asyncio.Future[dict[str, object]]] = {}
+        self._pending: dict[int, tuple[asyncio.Future[dict[str, object]], str | None]] = {}
         self._sequence = 0
 
     async def start(
@@ -66,7 +69,11 @@ class CodexRpc:
         self._sequence += 1
         request_id = self._sequence
         future: asyncio.Future[dict[str, object]] = asyncio.get_running_loop().create_future()
-        self._pending[request_id] = future
+        resume_thread = params.get("threadId") if method == "thread/resume" else None
+        self._pending[request_id] = (
+            future,
+            resume_thread if isinstance(resume_thread, str) else None,
+        )
         try:
             await self.send({"id": request_id, "method": method, "params": params})
             return await asyncio.wait_for(future, timeout)
@@ -88,7 +95,7 @@ class CodexRpc:
         except (ValueError, OSError, CodexRpcError):
             pass  # The process boundary reports a safe failure, never raw protocol text.
         finally:
-            for future in self._pending.values():
+            for future, _ in self._pending.values():
                 if not future.done():
                     future.set_exception(CodexRpcError())
             # Wake the event consumer even when the provider closes unexpectedly.
@@ -116,14 +123,29 @@ class CodexRpc:
 
     def _receive_reply(self, message: dict[str, object]) -> None:
         request_id = message.get("id")
-        future = self._pending.get(request_id) if isinstance(request_id, int) else None
-        if future is None or future.done():
+        pending = self._pending.get(request_id) if isinstance(request_id, int) else None
+        if pending is None:
+            return
+        future, resume_thread = pending
+        if future.done():
             return
         result = message.get("result")
         if "error" in message or not isinstance(result, dict):
             error = message.get("error")
-            code = cast(dict[str, object], error).get("code") if isinstance(error, dict) else None
-            future.set_exception(CodexRpcError(code if isinstance(code, int) else None))
+            fields = cast(dict[str, object], error) if isinstance(error, dict) else {}
+            code, detail = fields.get("code"), fields.get("message")
+            session_unavailable = (
+                resume_thread is not None
+                and code == -32600
+                and isinstance(detail, str)
+                and is_missing_session_error(detail, resume_thread)
+            )
+            future.set_exception(
+                CodexRpcError(
+                    code if isinstance(code, int) else None,
+                    session_unavailable=session_unavailable,
+                )
+            )
         else:
             future.set_result(cast(dict[str, object], result))
 

@@ -297,7 +297,7 @@ class CodexTool:
                         if request.resume_session_id
                         and process.returncode != 0
                         and all(event.kind == "error" for event in events)
-                        and _missing_session(failure_diagnostic, request.resume_session_id)
+                        and is_missing_session_error(failure_diagnostic, request.resume_session_id)
                         else CodexErrorCode.EXECUTION_FAILED
                     ),
                     return_code=process.returncode,
@@ -372,7 +372,9 @@ def resolve_codex_binary() -> str:
     return str(local)
 
 
-def _missing_session(diagnostic: str | None, session_id: str) -> bool:
+def is_missing_session_error(diagnostic: str | None, session_id: str) -> bool:
+    """Match an explicit provider error for the requested session."""
+
     if diagnostic is None:
         return False
     identity = re.escape(session_id)

@@ -58,6 +58,7 @@ class FakeRunner:
         self.agent_session_ids: list[str | None] = []
         self.images: list[tuple[Path, ...]] = []
         self.next_flow_id: str | None = None
+        self.next_result: AgentResult | None = None
         self.next_final_text = "Workspace 已检查"
         self.next_events: tuple[AgentEvent, ...] = ()
         self.provider = "test-agent"
@@ -95,7 +96,7 @@ class FakeRunner:
                     message="Test Agent 正在检查 Workspace 文件…",
                 )
             )
-        return AgentResult(
+        return self.next_result or AgentResult(
             status="succeeded",
             final_text=self.next_final_text,
             agent_session_id="provider-session-1",
@@ -1243,6 +1244,50 @@ def test_saved_execution_settings_apply_to_resumed_request(
         "image_count": 0,
     }
     assert trace.finished == ("succeeded", None, "Workspace 已检查")
+
+
+@pytest.mark.parametrize(
+    ("error_code", "returned_session", "next_session"),
+    [
+        (AgentErrorCode.EXECUTION_FAILED, None, "provider-session-1"),
+        (AgentErrorCode.EXECUTION_FAILED, "provider-session-1", "provider-session-1"),
+        (AgentErrorCode.TIMEOUT, None, "provider-session-1"),
+        (AgentErrorCode.SESSION_UNAVAILABLE, None, None),
+    ],
+)
+def test_next_message_only_starts_fresh_when_the_saved_session_is_unavailable(
+    reload_runtime: ReloadRuntime,
+    error_code: AgentErrorCode,
+    returned_session: str | None,
+    next_session: str | None,
+) -> None:
+    runtime = reload_runtime
+
+    async def run() -> None:
+        await runtime.service.handle_message(reload_message("first"))
+        await runtime.service.wait_for_idle()
+        runner = runtime.runners[0][1]
+        status = "timed_out" if error_code == AgentErrorCode.TIMEOUT else "failed"
+        runner.next_result = AgentResult(
+            status=status,
+            error_code=error_code,
+            agent_session_id=returned_session,
+        )
+        await runtime.service.handle_message(reload_message("second"))
+        await runtime.service.wait_for_idle()
+        session = runtime.service.session_store.get_or_create_session(reload_message("second"))
+        assert session.agent_session_id == next_session
+        assert runner.agent_session_ids == [None, "provider-session-1"]
+        runner.next_result = None
+        await runtime.service.handle_message(reload_message("third"))
+        await runtime.service.wait_for_idle()
+        assert runner.agent_session_ids == [None, "provider-session-1", next_session]
+        assert ("<conversation-history>" in runner.prompts[-1]) == (next_session is None)
+        assert runtime.service.session_store.event_status("second") == status
+        assert runtime.service.session_store.event_status("third") == "succeeded"
+        await runtime.service.stop()
+
+    asyncio.run(run())
 
 
 def test_model_reload_keeps_active_snapshot_and_refreshes_queued_turn(

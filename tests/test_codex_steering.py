@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 
 from lumon.agents.agent.steering_policy import steering_policy
-from lumon.tools.codex import CodexRequest, CodexTool
+from lumon.tools.codex import CodexErrorCode, CodexRequest, CodexTool
 from lumon.tools.codex_app_server import execute_steerable
 from lumon.tools.steering import SteeringControl, SteeringInput
 
@@ -44,8 +44,16 @@ for line in sys.stdin:
         print('private token=do-not-expose', flush=True)
         sys.exit(1)
     if method == 'initialize': reply(req, {})
+    elif method == 'thread/resume' and mode in ('missing', 'wrong_thread', 'wrong_code'):
+        missing = 'other-session' if mode == 'wrong_thread' else req['params']['threadId']
+        code = -32603 if mode == 'wrong_code' else -32600
+        send({'id':req['id'],'error':{'code':code,
+            'message':'no rollout found for thread id '+missing}})
     elif method in ('thread/start', 'thread/resume'):
         reply(req, {'thread': {'id':'thread-1'}})
+    elif method == 'turn/start' and mode == 'turn_error':
+        send({'id':req['id'],'error':{'code':-32600,
+            'message':'no rollout found for thread id previous-session'}})
     elif method == 'turn/start':
         turn += 1
         if mode == 'early':
@@ -169,6 +177,32 @@ def test_steerable_execution_does_not_start_if_skill_settings_fail(
     assert result.status == "failed"
     assert result.failure_diagnostic == "Unable to apply Workspace Skill settings."
     assert not (tmp_path / "requests").exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "error_code"),
+    [
+        ("missing", CodexErrorCode.SESSION_UNAVAILABLE),
+        ("wrong_thread", CodexErrorCode.EXECUTION_FAILED),
+        ("wrong_code", CodexErrorCode.EXECUTION_FAILED),
+        ("turn_error", CodexErrorCode.EXECUTION_FAILED),
+    ],
+)
+def test_resume_only_marks_the_requested_session_missing(
+    tmp_path: Path, mode: str, error_code: CodexErrorCode
+) -> None:
+    result = asyncio.run(
+        execute_steerable(
+            fake_tool(tmp_path, mode),
+            CodexRequest(tmp_path, "inspect", resume_session_id="previous-session"),
+            SteeringControl(),
+        )
+    )
+    assert result.status == "failed"
+    assert result.error_code == error_code
+    methods = [item["method"] for item in requests(tmp_path)]
+    assert "thread/start" not in methods
+    assert methods.count("turn/start") == int(mode == "turn_error")
 
 
 def test_native_steering_updates_same_turn_and_accepts_images(tmp_path: Path) -> None:

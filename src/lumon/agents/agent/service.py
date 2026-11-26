@@ -555,16 +555,19 @@ class AgentService:
                             ),
                         )
                 self._raise_if_cancellation_requested(message.event_id)
-                if resume_session_id is not None and result.status == "failed":
-                    stage = "clear_failed_agent_session"
-                    self.session_store.clear_agent_session(session_id)
-                elif result.agent_session_id is not None:
+                if result.agent_session_id is not None:
                     stage = "bind_agent_session"
                     self.session_store.bind_agent_session(
                         session_id,
                         result.agent_session_id,
                         codex_home=self._codex_home,
                     )
+                elif (
+                    resume_session_id is not None
+                    and result.error_code == AgentErrorCode.SESSION_UNAVAILABLE
+                ):
+                    stage = "clear_unavailable_agent_session"
+                    self.session_store.clear_agent_session(session_id)
                 status = result.status
                 error_code = result.error_code.value if result.error_code is not None else None
                 if result.status == "succeeded" and result.final_text:
@@ -1187,6 +1190,8 @@ def _failure_message(
         )
     if error_code == AgentErrorCode.EMPTY_RESULT.value:
         return "Agent 没有得到可用回答。请稍后重试。"
+    if error_code == AgentErrorCode.SESSION_UNAVAILABLE.value:
+        return f"旧的 {agent_name} 会话已无法续接。请再发一次，Agent 会带上已保存的聊天记录继续。"
     return "Agent 暂时无法完成这次请求。请运行 `lumon agent doctor` 检查配置和运行环境。"
 
 

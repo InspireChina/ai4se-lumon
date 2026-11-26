@@ -69,6 +69,9 @@ lumon/tools/codex.py
 明确的 `turn.failed` / `response.failed`、未恢复的错误、非零退出码和执行超时仍为失败，
 不会把中间回答当作最终结果，也不会重新执行整个请求。
 
+模型逾时或单轮失败时，下一条消息继续使用已绑定的会话。只有 Codex 在续接时明确
+报告找不到该会话，才清除绑定，并在下一条消息带入已保存的飞书聊天记录开启新会话
+
 Agent 的对话适配器位于 `lumon/agents/agent/runner.py`。它调用共享的
 `CodexTool` 的配置和 `codex_app_server.py` 的双向执行适配器，
 把命令/文件事件转换为聊天进度，并额外要求有可回复的最终文本；

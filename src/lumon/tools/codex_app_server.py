@@ -37,7 +37,11 @@ async def execute_steerable(
         return session.failure(CodexErrorCode.TIMEOUT, timed_out=True)
     except FileNotFoundError:
         return session.failure(CodexErrorCode.CLI_NOT_FOUND)
-    except (OSError, ValueError, CodexRpcError):
+    except CodexRpcError as exc:
+        if exc.session_unavailable:
+            return session.failure(CodexErrorCode.SESSION_UNAVAILABLE)
+        return session.failure(CodexErrorCode.EXECUTION_FAILED)
+    except (OSError, ValueError):
         return session.failure(CodexErrorCode.EXECUTION_FAILED)
     except LumonError:
         result = session.failure(CodexErrorCode.EXECUTION_FAILED)
