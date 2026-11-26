@@ -137,7 +137,7 @@ export function AgentSettingsPage({
 
   return (
     <div className="page-stack">
-      {(setupError || (setup && !setup.ready)) && <SetupChecklist report={setup} loading={checkingSetup} error={setupError} onRefresh={() => void refreshSetup()} />}
+      {(setupError || setup) && <SetupChecklist report={setup} loading={checkingSetup} error={setupError} onRefresh={() => void refreshSetup()} />}
       <section className="panel agent-settings-panel" aria-labelledby="agent-runtime-title" aria-busy={saving === "agent"}>
         <div className="panel-heading">
           <div className="settings-title">

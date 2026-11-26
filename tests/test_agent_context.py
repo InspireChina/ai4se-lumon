@@ -117,6 +117,8 @@ def test_unique_workspace_is_resolved_and_prompt_contains_local_rules(
     assert "id: aws-cli; brief: Inspect AWS resources." in prompt
     assert "full detail: lumon/capabilities/aws-cli.md" in prompt
     assert "<lumon-channel-context>" in prompt
+    assert "`lark-cli mail +thread`" in prompt
+    assert "`lark-cli docs +fetch`" in prompt
     assert "chat_id: oc-current" in prompt
     assert "source_message_id: om-source" in prompt
     assert "delivery_mode: group_thread" in prompt

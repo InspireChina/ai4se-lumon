@@ -43,6 +43,7 @@ class DependencyCheckResponse(StrictModel):
     state: DependencyState
     action: str | None
     documentation_url: str | None
+    required: bool = True
 
 
 class SetupResponse(StrictModel):

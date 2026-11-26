@@ -23,6 +23,7 @@ def test_agent_configure_collects_secret_without_printing_it(
 
     assert result.exit_code == 0, result.stdout
     assert "secret-value" not in result.stdout
+    assert "Lark CLI is optional" in result.stdout
     config = AgentConfigStore(tmp_path / "lumon").load()
     assert config.feishu_app_id == "cli_test"
     assert config.feishu_app_secret == "secret-value"
@@ -39,6 +40,25 @@ def test_agent_doctor_json_is_safe_when_not_configured(
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert "secret" not in result.stdout.casefold()
+
+
+def test_agent_doctor_treats_missing_lark_cli_as_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    def inspect() -> agent_commands.AgentDoctorReport:
+        return agent_commands.AgentDoctorReport(
+            (
+                agent_commands.AgentDoctorCheck("agent_cli", True, "configured"),
+                agent_commands.AgentDoctorCheck("lark_cli", False, "missing", required=False),
+            )
+        )
+
+    monkeypatch.setattr(agent_commands, "_inspect_agent", inspect)
+    result = CliRunner().invoke(app, ["agent", "doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["checks"][1]["required"] is False
+    assert payload["checks"][1]["ok"] is False
 
 
 def test_agent_doctor_reports_the_configured_model_and_effort(

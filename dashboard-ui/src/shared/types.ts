@@ -160,7 +160,7 @@ export interface BootstrapState {
 export type DependencyState = "ready" | "missing" | "needs_login" | "incompatible" | "error";
 
 export interface SetupReport {
-  checks: { name: string; state: DependencyState; action: string | null; documentation_url: string | null }[];
+  checks: { name: string; state: DependencyState; action: string | null; documentation_url: string | null; required?: boolean }[];
   hosts: string[];
   ready: boolean;
   agent_configured: boolean;

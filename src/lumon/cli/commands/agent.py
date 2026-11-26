@@ -29,6 +29,7 @@ from lumon.agents.agent.session_store import resolve_database_path
 from lumon.agents.agent.workspace_context import WorkspaceContextBuilder
 from lumon.errors import AgentConfigError, AgentRuntimeError, LumonError
 from lumon.tools.codex import resolve_codex_binary
+from lumon.tools.setup import inspect_lark_cli
 from lumon.workspace.registry import UserStateLayout, WorkspaceRegistry
 
 agent_app = typer.Typer(
@@ -46,6 +47,7 @@ class AgentDoctorCheck:
     name: str
     ok: bool
     detail: str
+    required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +58,7 @@ class AgentDoctorReport:
 
     @property
     def ok(self) -> bool:
-        return all(check.ok for check in self.checks)
+        return all(check.ok for check in self.checks if check.required)
 
     def to_dict(self) -> dict[str, object]:
         return {"ok": self.ok, "checks": [asdict(check) for check in self.checks]}
@@ -94,6 +96,10 @@ def configure() -> None:
         raise typer.Exit(code=exc.exit_code) from exc
     typer.echo(f"Agent configuration saved: {store.path}")
     typer.echo("App Secret stored with owner-only file permissions.")
+    typer.echo(
+        "Lark CLI is optional. Set it up to read quoted emails and Feishu documents. "
+        "Check it with `lumon agent doctor`."
+    )
 
 
 @agent_app.command("doctor")
@@ -107,7 +113,7 @@ def doctor(
         typer.echo(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     else:
         for check in report.checks:
-            marker = "ok" if check.ok else "fail"
+            marker = "ok" if check.ok else "fail" if check.required else "optional"
             typer.echo(f"[{marker}] {check.name}: {check.detail}")
     if not report.ok:
         raise typer.Exit(code=3)
@@ -239,6 +245,17 @@ def _inspect_agent() -> AgentDoctorReport:
             "feishu_sdk",
             sdk_available,
             "lark-channel-sdk available" if sdk_available else "lark-channel-sdk is unavailable",
+        )
+    )
+    lark_cli = inspect_lark_cli()
+    checks.append(
+        AgentDoctorCheck(
+            lark_cli.name,
+            lark_cli.state == "ready",
+            f"{lark_cli.state.replace('_', ' ')}: {lark_cli.action}"
+            if lark_cli.action
+            else "Local Lark CLI user sign-in is available.",
+            required=lark_cli.required,
         )
     )
 

@@ -14,7 +14,10 @@ from lumon.flows.model import FlowBrief, FlowDefinition
 _TEMPLATE_PACKAGE = "lumon.agents.agent.templates"
 _PROMPT_TEMPLATE_NAME = "workspace_prompt.md"
 _FEISHU_SOURCE_RULES = (
-    "When the user asks about a quoted email or document, review the entire email thread "
+    "For quoted emails and Feishu documents, use the source results Lumon retrieves "
+    "through the local Lark CLI (`lark-cli`). Lumon uses `lark-cli mail +thread` "
+    "for the original email thread and `lark-cli docs +fetch` for the document. "
+    "Before answering, review the entire email thread "
     "in chronological order, including each attachment, or the full document text before "
     "answering. Lumon provides retrieval results in <feishu-reference-context>. Each email "
     "attachment names its thread and message number. Email image numbers refer to the images "

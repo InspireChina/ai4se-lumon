@@ -37,6 +37,26 @@ _LOCAL_MAIL_DATE = re.compile(
     r"(?:[（(]\s*(?:周|週|星期)[一二三四五六日天]\s*[）)]\s*)?"
     r"(\d{1,2}:\d{2})(?=\s|$)"
 )
+_ENGLISH_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_ENGLISH_MONTHS = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+_PARTIAL_MAIL_DATE = re.compile(
+    rf"({'|'.join(_ENGLISH_WEEKDAYS)})\s*,\s*"
+    rf"({'|'.join(_ENGLISH_MONTHS)})\s*,\s*((?:[01]\d|2[0-3]):[0-5]\d)(?=\s|$)",
+    re.IGNORECASE,
+)
 _MAX_SOURCE_LENGTH = 160_000
 _MAX_ATTACHMENT_COUNT = 32
 _MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
@@ -59,6 +79,7 @@ class MailPreview:
     subject: str
     sender: str
     date: datetime | None
+    partial_date: tuple[str, str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +198,12 @@ def _mail_preview(text: str) -> MailPreview | None:
         return None
     local_date = _LOCAL_MAIL_DATE.match(plain, date.start(1))
     timestamp = f"{local_date[1]} {local_date[2]}" if local_date else date[1]
-    return MailPreview(plain.splitlines()[0].lstrip("# ").strip(), address, _date(timestamp))
+    subject = plain.splitlines()[0].lstrip("# ").strip()
+    parsed_date = _date(timestamp)
+    # Some Feishu cards omit the day and year from the API's rendered date.
+    partial = _PARTIAL_MAIL_DATE.match(plain, date.start(1)) if parsed_date is None else None
+    partial_date = (partial[1].casefold(), partial[2].casefold(), partial[3]) if partial else None
+    return MailPreview(subject, address, parsed_date, partial_date)
 
 
 def _date(value: str) -> datetime | None:
@@ -209,31 +235,35 @@ def _minute(value: datetime) -> datetime:
     return value.replace(tzinfo=None, second=0, microsecond=0)
 
 
-def _mail_matches(item: Mapping[str, object], preview: MailPreview, date: datetime) -> bool:
-    if _string(item.get("subject")).casefold() != preview.subject.casefold():
+def _mail_matches(item: Mapping[str, object], preview: MailPreview) -> bool:
+    if unescape(_string(item.get("subject"))).casefold() != preview.subject.casefold():
         return False
     if parseaddr(_string(item.get("from")))[1].casefold() != preview.sender:
         return False
     sent = _date(_string(item.get("date")))
     if sent is None:
         return False
+    date = preview.date
+    if date is None:
+        local_time = sent.astimezone()
+        return preview.partial_date == (
+            _ENGLISH_WEEKDAYS[local_time.weekday()],
+            _ENGLISH_MONTHS[local_time.month - 1],
+            local_time.strftime("%H:%M"),
+        )
     if _minute(sent) == _minute(date) and date.tzinfo is None:
         return True
     return _minute(sent.astimezone(date.tzinfo)) == _minute(date)
 
 
 async def _resolve_thread(preview: MailPreview, read: AsyncCliRead) -> tuple[str, str] | None:
-    if not preview.subject or preview.date is None:
+    if not preview.subject or (preview.date is None and preview.partial_date is None):
         return None
     filters = json.dumps({"subject": preview.subject, "from": [preview.sender]}, ensure_ascii=False)
     listing = await read("mail", "+triage", "--filter", filters, "--max", "100")
     if listing.get("has_more") is not False:
         return None
-    matches = [
-        item
-        for item in _objects(listing.get("messages"))
-        if _mail_matches(item, preview, preview.date)
-    ]
+    matches = [item for item in _objects(listing.get("messages")) if _mail_matches(item, preview)]
     if len(matches) != 1:
         return None
     message_id = _string(matches[0].get("message_id"))

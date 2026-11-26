@@ -22,7 +22,13 @@ export function SetupChecklist({ report, loading, error, onRefresh }: SetupCheck
     {loading && !report && <p role="status">{t("setup.checking")}</p>}
     {error && <p role="alert">{error}</p>}
     {report && <ul>{report.checks.map((check) => <li key={check.name}>
-      <div className="setup-check-state"><span>{({ gh: "GitHub CLI", codex: "Codex CLI", git: "Git" } as Record<string, string>)[check.name] ?? check.name}</span><span className={check.state === "ready" ? "setup-ready" : "setup-pending"}>{states[check.state]}</span></div>
+      <div className="setup-check-state">
+        <span>
+          {({ gh: "GitHub CLI", codex: "Codex CLI", git: "Git", lark_cli: "Lark CLI" } as Record<string, string>)[check.name] ?? check.name}
+          {check.required === false && ` · ${t("setup.optional")}`}
+        </span>
+        <span className={check.state === "ready" ? "setup-ready" : "setup-pending"}>{states[check.state]}</span>
+      </div>
       {check.state !== "ready" && <div className="setup-action">
         {check.action && (check.action.startsWith("https://") ? <a href={check.action} target="_blank" rel="noreferrer">{t("setup.installGuide")}</a> : <code>{check.action}</code>)}
         {check.documentation_url && !check.action?.startsWith("https://") && <a href={check.documentation_url} target="_blank" rel="noreferrer">{t("setup.installGuide")}</a>}

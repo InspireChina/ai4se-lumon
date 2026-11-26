@@ -63,6 +63,26 @@ const workspaceOptions: WorkspaceListItem[] = [
   { workspace_id: "invalid-id", name: "workspace", health: "invalid", path: "/test/invalid", registered_at: "2026-10-10T00:00:00Z", detail: "Invalid manifest." },
 ];
 
+it.each([["missing", "Not installed"], ["ready", "Ready"]] as const)(
+  "shows the optional Lark CLI check when its state is %s",
+  async (state, label) => {
+    vi.spyOn(dashboardApi, "getSetup").mockResolvedValue({
+      checks: [{ name: "lark_cli", state, required: false, action: null, documentation_url: null }],
+      hosts: [],
+      ready: true,
+      agent_configured: true,
+    });
+    const view = await mount();
+    try {
+      const check = view.container.querySelector('[aria-label="Environment checks"] li');
+      expect(check?.textContent).toContain("Lark CLI · Optional");
+      expect(check?.textContent).toContain(label);
+      await view.edit("#feishu-app-id", "cli_test");
+      expect(view.saveButton("agent").disabled).toBe(false);
+    } finally { await view.unmount(); }
+  },
+);
+
 it.each([
   ["en", "Path missing", "Invalid configuration"],
   ["zh-CN", "路径不存在", "配置异常"],

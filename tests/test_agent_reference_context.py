@@ -8,7 +8,7 @@ import json
 import subprocess
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -149,6 +149,56 @@ def test_does_not_guess_an_email_thread_from_ambiguous_or_partial_results(
     ).text
 
     assert '"status": "unavailable"' in context
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_reads_mail_from_a_card_with_missing_day_and_year(ambiguous: bool, tmp_path: Path) -> None:
+    message = replace(
+        _MESSAGE,
+        text=_MAIL_CARD.replace("Release approval", "Release &amp; approval").replace(
+            "Wed, Nov 18, 2026, 11:39", "Thursday\n,\nNovember\n,\n09:18"
+        ),
+    )
+    sent = datetime(2026, 11, 26, 9, 18, 24).astimezone()
+    match = {
+        **_MATCH,
+        "subject": "Release &amp; approval",
+        "date": sent.astimezone(UTC).isoformat(),
+        "thread_id": "thread-1",
+    }
+    other_sent = sent - timedelta(days=7 if ambiguous else 1)
+    other = {
+        **match,
+        "message_id": "mail-other",
+        "thread_id": "thread-other",
+        "date": other_sent.astimezone(UTC).isoformat(),
+    }
+    calls: list[str] = []
+
+    def read(*args: str) -> Mapping[str, object]:
+        command = args[1]
+        calls.append(command)
+        if command == "+get-user":
+            return {"user": {"union_id": "on_requester"}}
+        if command == "+triage":
+            assert json.loads(args[3])["subject"] == "Release & approval"
+            return {"messages": [other, match], "has_more": False}
+        assert not ambiguous
+        assert args == ("mail", "+thread", "--thread-id=thread-1", "--html=false")
+        return {
+            "message_count": 1,
+            "messages": [{"message_id": "mail-2", "body_plain_text": "Original message"}],
+        }
+
+    context = asyncio.run(read_reference_context(message, image_directory=tmp_path, read=read)).text
+
+    if ambiguous:
+        assert calls == ["+get-user", "+triage"]
+        assert '"status": "unavailable"' in context
+    else:
+        assert calls == ["+get-user", "+triage", "+thread"]
+        assert '"status": "complete"' in context
+        assert "Original message" in context
 
 
 def test_fetches_original_document_without_selection_anchor(tmp_path: Path) -> None:

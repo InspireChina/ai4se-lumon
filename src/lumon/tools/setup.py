@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import cast
 
 from lumon.tools.codex import resolve_codex_binary
 from lumon.tools.github_auth import CommandRunner, DependencyState, github_authentication
@@ -18,6 +21,7 @@ class DependencyCheck:
     state: DependencyState
     action: str | None = None
     documentation_url: str | None = None
+    required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +31,57 @@ class SetupReport:
 
     @property
     def ready(self) -> bool:
-        return all(check.state == "ready" for check in self.checks)
+        return all(check.state == "ready" for check in self.checks if check.required)
+
+
+def inspect_lark_cli(runner: CommandRunner | None = None) -> DependencyCheck:
+    """Check local Lark CLI user sign-in without verifying a mailbox or changing credentials."""
+    documentation = "https://github.com/larksuite/cli#installation--quick-start"
+    state = _lark_cli_state(runner or subprocess.run)
+    action = {
+        "missing": documentation,
+        "needs_login": "lark-cli auth login --domain mail --domain docs --domain contact",
+        "error": "lark-cli auth status --json",
+    }.get(state)
+    return DependencyCheck(
+        "lark_cli",
+        state,
+        action,
+        documentation,
+        required=False,
+    )
+
+
+def _lark_cli_state(run: CommandRunner) -> DependencyState:
+    executable = shutil.which("lark-cli")
+    if executable is None:
+        return "missing"
+    try:
+        result = run(
+            [executable, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            env={
+                **os.environ,
+                "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
+                "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
+            },
+        )
+        payload: object = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return "error"
+    identities = (
+        cast(dict[str, object], payload).get("identities") if isinstance(payload, dict) else None
+    )
+    if not isinstance(identities, dict):
+        return "error"
+    user = cast(dict[str, object], identities).get("user")
+    available = cast(dict[str, object], user).get("available") if isinstance(user, dict) else None
+    if isinstance(available, bool):
+        return "ready" if available else "needs_login"
+    return "error"
 
 
 class SetupInspector:
@@ -61,6 +115,7 @@ class SetupInspector:
                 git,
                 DependencyCheck("gh", github.state, github_action, "https://cli.github.com/"),
                 self._codex_check(),
+                inspect_lark_cli(self._run),
             ),
             github.hosts,
         )

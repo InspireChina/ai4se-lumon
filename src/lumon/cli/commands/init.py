@@ -43,8 +43,9 @@ def command(
         setup = SetupInspector().inspect()
         if not json_output:
             for check in setup.checks:
+                label = check.name if check.required else f"{check.name} (optional)"
                 typer.echo(
-                    f"[{check.state}] {check.name}" + (f": {check.action}" if check.action else "")
+                    f"[{check.state}] {label}" + (f": {check.action}" if check.action else "")
                 )
         specifications = collect_repository_specifications(
             repository, json_output, hosts=setup.hosts
@@ -55,7 +56,9 @@ def command(
         if result.status != "dry_run":
             _set_default_for_sole_workspace()
         warnings = tuple(
-            f"{check.name}: {check.state}" + (f"; {check.action}" if check.action else "")
+            (check.name if check.required else f"{check.name} (optional)")
+            + f": {check.state}"
+            + (f"; {check.action}" if check.action else "")
             for check in setup.checks
             if check.state != "ready"
         )

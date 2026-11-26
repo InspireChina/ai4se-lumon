@@ -32,6 +32,9 @@ class Commands:
             "",
         )
         self.codex = subprocess.CompletedProcess([], 0, "Logged in", "")
+        self.lark = subprocess.CompletedProcess(
+            [], 0, json.dumps({"identities": {"user": {"available": True}}}), ""
+        )
         self.calls: list[list[str]] = []
         self.failure: OSError | subprocess.TimeoutExpired | None = None
 
@@ -39,6 +42,8 @@ class Commands:
         self.calls.append(command)
         if self.failure:
             raise self.failure
+        if command[0] == "lark-cli":
+            return self.lark
         return self.github if "gh" in command[0] else self.codex
 
 
@@ -61,7 +66,39 @@ def test_ready_tools_do_not_start_agent(commands: Commands) -> None:
     assert commands.calls == [
         ["/test/gh", "auth", "status", "--json", "hosts"],
         ["/test/codex", "login", "status"],
+        ["lark-cli", "auth", "status", "--json"],
     ]
+    assert report.checks[-1].state == "ready"
+    assert report.checks[-1].required is False
+
+
+def test_missing_lark_cli_is_optional(commands: Commands, monkeypatch: pytest.MonkeyPatch) -> None:
+    def which(name: str) -> str | None:
+        return None if name == "lark-cli" else name
+
+    monkeypatch.setattr(setup.shutil, "which", which)
+    report = SetupInspector(commands.run).inspect()
+
+    assert report.ready
+    assert report.checks[-1].state == "missing"
+    assert report.checks[-1].required is False
+    assert len(commands.calls) == 2
+
+
+def test_lark_cli_sign_in_is_optional_and_hides_user_details(commands: Commands) -> None:
+    commands.lark.stdout = json.dumps(
+        {
+            "identities": {
+                "bot": {"available": True},
+                "user": {"available": False, "openId": "private-id"},
+            }
+        }
+    )
+    report = SetupInspector(commands.run).inspect()
+
+    assert report.ready
+    assert report.checks[-1].state == "needs_login"
+    assert "private-id" not in repr(report)
 
 
 def test_missing_tools_are_explicit_and_safe(
@@ -75,7 +112,7 @@ def test_missing_tools_are_explicit_and_safe(
     monkeypatch.setattr(setup.shutil, "which", which)
     report = SetupInspector(commands.run).inspect()
     assert not report.ready
-    assert [check.state for check in report.checks] == ["missing", "missing", "missing"]
+    assert [check.state for check in report.checks] == ["missing", "missing", "missing", "missing"]
     assert "install.sh" in (report.checks[2].action or "")
     assert commands.calls == []
 
@@ -111,7 +148,7 @@ def test_process_failure_is_not_a_login_instruction(
 ) -> None:
     commands.failure = failure
     report = SetupInspector(commands.run).inspect()
-    assert [check.state for check in report.checks] == ["ready", "error", "error"]
+    assert [check.state for check in report.checks] == ["ready", "error", "error", "error"]
     assert "private" not in repr(report)
 
 
@@ -147,6 +184,7 @@ def test_setup_api_distinguishes_tools_from_agent_configuration(client: TestClie
     assert response.status_code == 200
     assert response.json()["ready"] is True
     assert response.json()["agent_configured"] is False
+    assert response.json()["checks"][-1]["required"] is False
     assert response.headers["cache-control"] == "no-store"
     assert (
         client.get("/api/setup", headers={"Origin": "https://attacker.example"}).status_code == 403
