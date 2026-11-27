@@ -14,7 +14,6 @@ dependencies = [
     "httpx>=0.28,<1",
     "langfuse>=4,<5",
     "lark-channel-sdk>=1.4,<2",
-    "openai>=3.31,<4",
     "playwright>=1.59,<2",
     "tomli-w>=1.2,<2",
     "typer>=0.15,<1",
@@ -30,6 +29,7 @@ lumon = "lumon.cli.app:main"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2,<3",
     "pyright>=1.1.390,<2",
     "pytest>=8.3,<9",
     "ruff>=0.8,<1",

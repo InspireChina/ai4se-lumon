@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -9,8 +10,11 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 Platform = Literal["web", "ios"]
+TestEnvironment = Literal["test", "staging", "development", "uat"]
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")]
 Command = Annotated[tuple[str, ...], Field(min_length=1, max_length=64)]
+ApprovedOrigins = Annotated[tuple[str, ...], Field(max_length=32)]
+_PRODUCTION_MARKER = re.compile(r"(?:^|[.:_-])(?:prod|production)(?:$|[.:_-])", re.I)
 
 
 class SettingsModel(BaseModel):
@@ -47,6 +51,7 @@ class BuildTarget(SettingsModel):
 
 
 class WebTarget(BuildTarget):
+    environment: TestEnvironment | None = None
     directory: str = "."
     output: str
     base_path: str = "/"
@@ -116,24 +121,53 @@ class AutoTestControls(SettingsModel):
     jira_site: str = Field(default="", pattern=r"^([a-z0-9][a-z0-9-]*\.atlassian\.net)?$")
     jira_project: str = Field(default="", pattern=rf"^({JIRA_PROJECT_KEY_PATTERN})?$")
     trigger_jql: str = Field(default="", max_length=8000)
-    model: Identifier = "gpt-6.1-sol"
 
 
 class AutoTestSettings(AutoTestControls):
     """Keep operator-approved targets and services in the local Workspace profile."""
 
-    qa_origins: tuple[str, ...] = Field(default=(), max_length=32)
+    qa_origins: ApprovedOrigins = ()  # Read legacy profiles without granting network access.
+    qa_environments: dict[TestEnvironment, ApprovedOrigins] = Field(
+        default_factory=dict[TestEnvironment, ApprovedOrigins]
+    )
     web: WebTarget | None = None
     ios: IosTarget | None = None
     backends: tuple[QABackend, ...] = Field(default=(), max_length=16)
 
     @field_validator("qa_origins")
     @classmethod
-    def validate_origins(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        for value in values:
-            if https_origin(value) != value:
-                raise ValueError("List HTTPS QA origins without paths or query parameters.")
+    def validate_origins(cls, values: ApprovedOrigins) -> ApprovedOrigins:
+        _validate_origins(values)
         return values
+
+    @field_validator("qa_environments")
+    @classmethod
+    def validate_environments(
+        cls, environments: dict[TestEnvironment, ApprovedOrigins]
+    ) -> dict[TestEnvironment, ApprovedOrigins]:
+        registered: set[tuple[str, int]] = set()
+        for origins in environments.values():
+            _validate_origins(origins)
+            for origin in origins:
+                parsed = urlsplit(origin)
+                hostname = parsed.hostname or ""
+                if production_marker(hostname):
+                    raise ValueError("Production origins are unavailable in Auto Test.")
+                endpoint = (hostname.rstrip("."), parsed.port if parsed.port is not None else 443)
+                if endpoint in registered:
+                    raise ValueError("Register each HTTPS origin in one test environment only.")
+                registered.add(endpoint)
+        return environments
+
+
+def production_marker(value: str) -> bool:
+    return _PRODUCTION_MARKER.search(value) is not None
+
+
+def _validate_origins(origins: ApprovedOrigins) -> None:
+    for origin in origins:
+        if https_origin(origin) != origin:
+            raise ValueError("List HTTPS QA origins without paths or query parameters.")
 
 
 def relative_path(value: str) -> str:
@@ -145,7 +179,9 @@ def relative_path(value: str) -> str:
 
 def https_origin(value: str) -> str:
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    hostname = parsed.hostname
+    if parsed.scheme != "https" or not hostname or parsed.username is not None:
         raise ValueError("Specify a credential-free HTTPS URL.")
     port = f":{parsed.port}" if parsed.port is not None else ""
-    return f"https://{parsed.hostname}{port}"
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    return f"https://{host}{port}"

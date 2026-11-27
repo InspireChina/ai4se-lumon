@@ -54,10 +54,22 @@ class Case(Record):
         return tuple(dict.fromkeys(step.platform for step in self.steps))
 
 
+class ClarificationQuestion(Record):
+    criterion: Text
+    question: Text
+
+
+class ClarificationAnswer(Record):
+    number: int = Field(ge=1, le=5)
+    quote: Text
+
+
 class CasePlan(Record):
     criteria: tuple[AcceptanceCriterion, ...] = Field(max_length=100)
     cases: tuple[Case, ...] = Field(max_length=80)
     gaps: tuple[Text, ...] = Field(max_length=180)
+    questions: tuple[ClarificationQuestion, ...] = Field(default=(), max_length=5)
+    answers: tuple[ClarificationAnswer, ...] = Field(default=(), max_length=5)
 
 
 class Revision(Record):
@@ -90,6 +102,7 @@ class CaseResult(Record):
     case_id: str
     status: CaseStatus
     detail: str
+    question: Text | None = None
     observations: tuple[Observation, ...] = ()
     artifacts: tuple[Artifact, ...] = ()
 
@@ -99,6 +112,7 @@ class JiraReceipt(Record):
     comment_id: str | None = None
     attachments: dict[str, str] = Field(default_factory=dict)
     uncertain_writes: tuple[str, ...] = ()
+    block_confirmed: bool = False
     detail: str = ""
 
 
@@ -113,6 +127,8 @@ class TestRun(Record):
     finished_at: datetime | None = None
     status: RunStatus = "running"
     phase: str = "planning"
+    pilot: bool = False
+    clarification_run_id: UUID | None = None
     detail: str = ""
     revisions: tuple[Revision, ...] = ()
     builds: dict[str, str] = Field(default_factory=dict)

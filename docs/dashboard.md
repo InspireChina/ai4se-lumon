@@ -422,10 +422,11 @@ the execution prompt therefore forbids the Agent from moving a card back to entr
 conditions to authorize its own retry. Fully daemonized/reparented or remote jobs
 need explicit capability cleanup; Stop does not undo external effects.
 
-For a Blocked attempt, the Agent uses TWG to leave one Jira blocker comment with
-the reason and the next action. An operator can reply on the Story and move it
-back to the configured entry status, such as **Ready for Dev**. The next eligible
-poll continues the same worktree and Delivery receipt. The Agent reconciles the
+For a Blocked attempt, the Agent uses TWG to leave one Jira comment in the Story's
+language. It leads with the failed action and the next step for the operator.
+The operator can reply on the Story and move it back to the configured entry
+status, such as **Ready for Dev**. The next eligible poll continues the same
+worktree and Delivery receipt. The Agent reconciles the
 attempt's marker before retrying a comment write and saves the verified comment ID.
 Failures to publish the comment stay in the local Blocked receipt.
 

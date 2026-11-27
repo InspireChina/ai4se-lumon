@@ -1,4 +1,4 @@
-"""Bind Computer Use to the test page or simulator app owned by this run."""
+"""Bind UI actions to the test page or simulator app owned by this run."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ import base64
 import os
 import struct
 from abc import ABC, abstractmethod
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 import httpx
-from openai.lib.computer import ComputerActionInput, Screenshot
 from playwright.async_api import Page
+from pydantic import Field, StrictInt
 
 from lumon.auto_test.config import TargetSetup
-from lumon.auto_test.model import Check
+from lumon.auto_test.model import Check, Record
 from lumon.errors import PreflightError
 from lumon.tools.safety import sanitize_output
 
@@ -41,29 +41,67 @@ _KEYS = {
 _ELEMENT = "element-6066-11e4-a52e-4f735466cecf"
 
 
+class ScreenPoint(Record):
+    x: StrictInt
+    y: StrictInt
+
+
+class PointerAction(ScreenPoint):
+    type: Literal["click", "double_click", "move"]
+
+
+class ScrollAction(ScreenPoint):
+    type: Literal["scroll"]
+    scroll_x: StrictInt
+    scroll_y: StrictInt
+
+
+class DragAction(Record):
+    type: Literal["drag"]
+    path: tuple[ScreenPoint, ...] = Field(min_length=2, max_length=32)
+
+
+class TypeAction(Record):
+    type: Literal["type"]
+    text: str = Field(max_length=2000)
+
+
+class KeyAction(Record):
+    type: Literal["keypress"]
+    keys: list[str] = Field(min_length=1, max_length=1)
+
+
+class WaitAction(Record):
+    type: Literal["wait"]
+
+
+class ScreenshotAction(Record):
+    type: Literal["screenshot"]
+
+
+UiAction = PointerAction | ScrollAction | DragAction | TypeAction | KeyAction | WaitAction
+
+
+class ScreenRequest(Record):
+    action: UiAction | ScreenshotAction
+
+
 class Screen(ABC):
     def __init__(self) -> None:
         self.image_size: Viewport | None = None
         self.actions = 0
 
-    async def perform(self, action: ComputerActionInput) -> None:
+    async def perform(self, action: UiAction) -> None:
         await self.require_target()
         self.actions += 1
         if self.actions > 80:
             raise PreflightError("The Auto Test case exceeded the UI action limit.")
-        if getattr(action, "keys", None) and action.type != "keypress":
-            raise PreflightError("Modified pointer actions are not available in Auto Test.")
         await self.apply(action)
 
-    click = double_click = drag = keypress = move = scroll = type = wait = perform
-
-    async def screenshot(self) -> Screenshot:
+    async def screenshot(self) -> bytes:
         image = await self.capture_png()
         self.image_size = struct.unpack(">II", image[16:24])
-        return {
-            "type": "computer_screenshot",
-            "image_url": "data:image/png;base64," + base64.b64encode(image).decode(),
-        }
+        return image
 
     async def capture_png(self) -> bytes:
         await self.require_target()
@@ -107,7 +145,7 @@ class Screen(ABC):
     async def capture(self) -> bytes: ...
 
     @abstractmethod
-    async def apply(self, action: ComputerActionInput) -> None: ...
+    async def apply(self, action: UiAction) -> None: ...
 
     @abstractmethod
     async def element(self, selector: str, *, read_text: bool) -> tuple[bool, str]: ...
@@ -129,15 +167,18 @@ class WebScreen(Screen):
         super().__init__()
         self.page = page
         self.origins = origins
+        self.network_error = ""
 
     async def require_target(self) -> None:
+        if self.network_error:
+            raise PreflightError(self.network_error)
         if origin(self.page.url) not in self.origins:
             raise PreflightError("The browser left the configured QA origins.")
 
     async def capture(self) -> bytes:
         return await self.page.screenshot(type="png", scale="css", timeout=10000)
 
-    async def apply(self, action: ComputerActionInput) -> None:
+    async def apply(self, action: UiAction) -> None:
         viewport = self.page.viewport_size
         if viewport is None:
             raise PreflightError("Auto Test needs a fixed browser viewport.")
@@ -150,7 +191,7 @@ class WebScreen(Screen):
             or action.type == "scroll"
         ):
             x, y = self.point(action.x, action.y, bounds)
-            if action.type == "click" and action.button == "left":
+            if action.type == "click":
                 await mouse.click(x, y)
             elif action.type == "double_click":
                 await mouse.dblclick(x, y)
@@ -159,12 +200,8 @@ class WebScreen(Screen):
             elif action.type == "scroll":
                 await mouse.move(x, y)
                 await mouse.wheel(action.scroll_x, action.scroll_y)
-            else:
-                raise PreflightError("Only primary clicks are available in Auto Test.")
         elif action.type == "drag":
             points = [self.point(point.x, point.y, bounds) for point in action.path]
-            if len(points) < 2:
-                raise PreflightError("Auto Test needs two or more points for a drag.")
             await mouse.move(*points[0])
             await mouse.down()
             try:
@@ -224,7 +261,7 @@ class IosScreen(Screen):
             raise PreflightError("Appium returned an invalid screenshot.")
         return base64.b64decode(image, validate=True)
 
-    async def apply(self, action: ComputerActionInput) -> None:
+    async def apply(self, action: UiAction) -> None:
         if action.type in {"click", "double_click", "drag", "scroll"}:
             await self._touch(action)
         elif action.type == "type":
@@ -242,7 +279,7 @@ class IosScreen(Screen):
         else:
             await _wait()
 
-    async def _touch(self, action: ComputerActionInput) -> None:
+    async def _touch(self, action: UiAction) -> None:
         rect = _mapping(await self.request("GET", "/window/rect"))
         width, height = rect.get("width"), rect.get("height")
         if not isinstance(width, int) or not isinstance(height, int) or min(width, height) <= 0:
@@ -251,8 +288,6 @@ class IosScreen(Screen):
         if action.type == "drag":
             points = [self.point(point.x, point.y, bounds) for point in action.path]
         elif action.type == "click" or action.type == "double_click" or action.type == "scroll":
-            if action.type == "click" and action.button != "left":
-                raise PreflightError("Only primary touchscreen input is available in Auto Test.")
             points = [self.point(action.x, action.y, bounds)]
             if action.type == "scroll":
                 x, y = points[0]
@@ -264,8 +299,6 @@ class IosScreen(Screen):
                 )
         else:
             raise PreflightError("The iOS driver received an unsupported touch action.")
-        if not points:
-            raise PreflightError("The iOS test driver received an empty gesture path.")
         x, y = points[0]
         actions: list[dict[str, object]] = [
             {"type": "pointerMove", "duration": 0, "x": x, "y": y},

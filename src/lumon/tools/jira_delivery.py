@@ -92,7 +92,7 @@ class _Comment(BaseModel):
     id: str = Field(pattern=r"^[0-9]+$")
     created: datetime
     author: _Author | None = None
-    parent_id: str | None = Field(default=None, alias="parentId")
+    parent_id: str | None = Field(default=None, alias="parentId", coerce_numbers_to_str=True)
 
 
 class _CommentResponse(BaseModel):

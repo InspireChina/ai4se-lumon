@@ -369,8 +369,14 @@ def _parse_settings(
         _validate_flow_schedules(tuple(flow_schedules))
     except InvalidInputError as exc:
         raise PreflightError(f"Invalid Flow schedules: {source}") from exc
+    raw_auto_test = payload.get("auto_test", {})
+    if isinstance(raw_auto_test, dict):
+        # Existing profiles can contain the former per-Workspace model.
+        auto_test_fields = dict(cast(dict[str, object], raw_auto_test))
+        auto_test_fields.pop("model", None)
+        raw_auto_test = auto_test_fields
     try:
-        auto_test = AutoTestSettings.model_validate(payload.get("auto_test", {}))
+        auto_test = AutoTestSettings.model_validate(raw_auto_test)
     except ValidationError as exc:
         raise PreflightError(f"Invalid Auto Test settings: {source}") from exc
     settings = WorkspaceSettings(

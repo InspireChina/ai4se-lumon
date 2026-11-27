@@ -1,47 +1,47 @@
 # Lumon Auto Test
 
-在 Dashboard 的 **配置 → Auto Test** 保存 Jira 查询、排程和模型。排程默认关闭，默认间隔为五分钟。
+在 Dashboard 的 **Settings → Auto Test** 管理排程。排程默认关闭，默认间隔为五分钟。每轮测试使用 **Agent** 中的模型和推理强度。
 
 在 **自动化 → Auto Test** 可立即执行并查看测试记录。打开一笔记录可查看用例统计、Excel、录屏及 Jira 发布状态，也可停止运行或重测。
 
 ## Jira 触发条件
 
-在 **Settings → Jira** 中填写两个自动化功能共用的 Jira 站点和项目键。用 **Test connection** 检查 TWG 能否读取该项目。Auto Test 的触发查询在 **Settings → Auto Test** 中设置。
-
-下列示例选择进行中的 Sprint 里处于 **Ready For QA** 且带有 Jira Flag 的卡片。
-
-```jql
-project = TEAM
-AND sprint in openSprints()
-AND status = "Ready For QA"
-AND Flagged = Impediment
-ORDER BY Rank ASC
-```
+在 **Settings → Jira** 中填写 Jira 站点和项目键，再用 **Test connection** 检查 TWG 能否读取该项目。在 **Settings → Auto Test** 保存本工作区的触发 JQL。工作区的站点、项目键、查询和服务地址应保存在本机配置中。
 
 手动运行和定时任务使用同一查询。每次按排序领取一张尚未执行的卡片。**重测**会检查原卡资格，符合条件时建立一轮新记录。
 
 ## 配置本机工具
 
 1. 在运行 Lumon 的账号下登录 TWG，确认可以查询 Jira、读取卡片与评论、添加附件及创建和编辑自己的评论。
-2. 准备 Playwright Chromium。源码环境使用 `uv run playwright install chromium`。通过 Shell 安装 Lumon 时，使用 `~/.local/share/lumon/venv/bin/python -m playwright install chromium`。
-3. 测试 iOS 时，准备 Xcode、可用的 iPhone 模拟器、Appium 和 XCUITest 驱动。用 `appium driver install xcuitest` 安装驱动。
-4. 向工作进程提供 `OPENAI_API_KEY`。手动运行读取 Dashboard 或 CLI 的环境，定时运行读取 macOS 用户 launchd 环境。所选 OpenAI 项目需允许配置的 Computer Use 模型。 [OpenAI Computer Use 文档](https://developers.openai.com/api/docs/guides/tools-computer-use)
+2. 启动 Docker，提前拉取与 Lumon 的 Playwright 主版本和次版本匹配的 `mcr.microsoft.com/playwright:v<主版本>.<次版本>.0-noble` 镜像。测试启动时读取本机镜像。
+3. 安装 Codex CLI。Auto Test 使用 Agent 已登录的 Codex 配置。如需登录，在本机运行 `lumon agent codex-login`。
 
-## 构建和运行
+## 确认环境后运行
 
-Agent 从 Jira 验收条件出发，检查工作区已登记的储存库。首次读取某个储存库时，Lumon 固定其登记分支的最新提交。Agent 根据 README、项目文件和锁文件选择目标与用例。工作区可以通过 `lumon/flows/auto-test-case-generation.md` 或已启用的 `test-case-generation` Workflow 补充用例规则。
+Agent 根据 Jira 验收条件、评论及可读取的 HTML 和 Excel 参考附件设计用例。Lumon 在首次读取仓库时固定登记分支的提交。Agent 查阅该版本的 README、构建脚本、配置和锁文件，先识别 `test`、`staging`、`development` 或 `uat`，再选构建目标。环境为生产、证据不足或配置冲突时，该平台的用例标为阻塞。
 
-- Web 使用已登记的 npm、Yarn 或 pnpm 构建脚本与锁文件，或直接使用现有静态页面。Lumon 在临时副本构建，通过本机 HTTP 服务打开静态产物。
-- iOS 依据共享 Xcode Scheme、配置和可用的 iPhone Simulator 构建，使用 Appium 操作新建的测试模拟器。React Native 依赖使用项目锁文件。有 Podfile 时使用锁定的 CocoaPods 依赖。
-- 无法确定支持的构建目标时，该平台的用例会标记为阻塞。不同平台各自准备构建。
+- Web 在临时副本中离线构建，需要预先缓存工具链和依赖。macOS 使用系统沙盒，Linux 需要支持独立网络命名空间。现有静态页面可以作为本机测试或开发目标。
+- Chromium 在禁用网络的容器中运行。Lumon 只转发到本轮静态页面和所选环境已核准 origin 的 HTTP 请求。请求或重定向超出范围时会阻塞该用例。需要 WebSocket 的用例也会阻塞。
+- iOS 必须具备模拟器网络隔离才能运行。目前 iOS 用例会在构建和启动模拟器前标为阻塞。
 
-工作区本机配置 `~/.lumon/workspaces/<workspace-id>/config.toml` 中已有的 `[auto_test.web]` 和 `[auto_test.ios]` 仍可作为明确的构建覆盖。一般设置保存时会保留这些配置。
+维护者在本机配置的 `[auto_test.qa_environments]` 下按环境核准外部服务的 HTTPS origin。填写前须确认服务属于该非生产环境。同一 origin 只属于一个环境。旧版 `qa_origins` 需移到对应环境后才会生效。缺少核准地址时，`staging` 和 `uat` 会阻塞，`test` 和 `development` 可运行纯本机用例。
 
-本机 Web 页面可直接测试。外部 QA 服务需要由工作区维护者在 `[auto_test]` 的 `qa_origins` 中核准 HTTPS origin。需要指定账号时，构建覆盖中的 `setup` 可以引用 `LUMON_QA_` 开头的环境变量。设置步骤在录屏前完成。需要核对后端提交的用例使用本机配置中的 `backends`。版本查询必须属于已核准的 QA origin，并返回完整的部署 Git SHA。
+```toml
+[auto_test.qa_environments]
+staging = ["https://staging.example.test"]
+```
+
+本机配置可通过 `[auto_test.web]` 指定构建，使用 `environment` 明确指定非生产环境。`setup` 可引用 `LUMON_QA_` 开头的环境变量，在录屏前登录测试账号。需要核对后端提交的用例通过 `backends` 查询部署版本。版本查询必须在所选环境核准的 HTTPS origin 内，并返回与固定提交一致的完整 Git SHA。
+
+工作区可用 `lumon/flows/auto-test-case-generation.md` 或已启用的 `test-case-generation` Workflow 补充用例规则。
 
 ## 复核和补发
 
-测试记录显示通过、可复现失败、待复核和阻塞。失败用例会在新浏览器或 Appium 会话中重跑。在 Evidence 中预览 Excel、截图和录屏，并下载原始文件。
+测试记录显示通过、可复现失败、待复核和阻塞。失败用例会在新浏览器会话重跑。QA 可在 Evidence 查看截图及录屏，并下载含测试环境和构建版本的 Excel。
+
+验收条件缺少关键决定时，Agent 提出具体问题，Lumon 暂停剩余用例并保留已有证据。Lumon 通过 TWG 在原卡写入并确认问题评论，然后查询可用的 Jira 转态。存在可用的 Block 转态时，Lumon 执行并回读确认。Jira 需要额外字段时，评论仍会保留，Dashboard 显示转态失败的原因。
+
+有人回复问题且卡片重新符合触发 JQL 后，Agent 重新阅读评论。每个待确认问题都需要新回复中的证据。仍有未解问题时继续等待，答复齐全后再进入环境检查。
 
 Lumon 在原卡写一条本轮结果评论并附上产物。附件失败时可用 **重试 Jira 发布**补发，原评论会更新。Jira 未确认写入时，重试会先查阅原卡，避免重复评论或附件。停止后的证据仍可从本机下载。
 
@@ -49,9 +49,12 @@ Lumon 在原卡写一条本轮结果评论并附上产物。附件失败时可�
 
 ```bash
 lumon test poll --workspace-id <workspace-id> --manual
+lumon test poll --workspace-id <workspace-id> --issue-key <issue-key>
 lumon test poll --workspace-id <workspace-id> --retest <run-id>
 lumon test stop --workspace-id <workspace-id> <run-id>
 lumon test publish --workspace-id <workspace-id> <run-id>
 ```
 
-启用排程前，在工作区的 QA 环境中各完成一轮 Web 和 iOS 手动测试。对照构建 SHA，并从原 Jira 卡打开 Excel 和录屏，确认 QA 可以复核结果。
+`--issue-key` 试跑已配置 Jira 项目内的一张卡。试跑结果保存在本机，关键验收问题可按上述流程回写原卡。已在等待答复的卡片仍须重新符合触发 JQL。
+
+启用排程前，在已核准的环境完成一轮手动测试。对照构建 SHA，并从原 Jira 卡打开 Excel 和录屏，确认 QA 可以复核结果。

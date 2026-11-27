@@ -1059,7 +1059,7 @@ class DashboardService:
     def agent_settings(self) -> AgentSettingsView:
         """Read display-safe global Agent settings."""
 
-        return _agent_settings_view(self._load_agent_config())
+        return _agent_settings_view(self.agent_config_store.load_or_default())
 
     async def agent_models(self) -> tuple[CodexModel, ...]:
         """Discover choices without changing saved Agent settings or running jobs."""
@@ -1105,7 +1105,7 @@ class DashboardService:
     def update_agent_settings(self, update: AgentSettingsUpdate) -> AgentSettingsView:
         """Validate and persist global Agent settings."""
 
-        current = self._load_agent_config()
+        current = self.agent_config_store.load_or_default()
         default_workspace_id = self._resolve_default_workspace_id(update.default_workspace_id)
 
         current_observability = current.observability
@@ -1319,14 +1319,6 @@ class DashboardService:
         if registration is None:
             raise WorkspaceNotFoundError(f"Workspace is not registered: {workspace_id}")
         return registration
-
-    def _load_agent_config(self) -> AgentConfig:
-        try:
-            return self.agent_config_store.load()
-        except AgentConfigError:
-            if not self.agent_config_store.path.exists():
-                return AgentConfig()
-            raise
 
     def _resolve_default_workspace_id(self, requested: UUID | None) -> UUID | None:
         if requested is not None:

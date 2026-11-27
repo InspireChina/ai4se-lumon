@@ -1250,7 +1250,7 @@ def test_saved_execution_settings_apply_to_resumed_request(
     ("error_code", "returned_session", "next_session"),
     [
         (AgentErrorCode.EXECUTION_FAILED, None, "provider-session-1"),
-        (AgentErrorCode.EXECUTION_FAILED, "provider-session-1", "provider-session-1"),
+        (AgentErrorCode.EXECUTION_FAILED, "forked-session", "forked-session"),
         (AgentErrorCode.TIMEOUT, None, "provider-session-1"),
         (AgentErrorCode.SESSION_UNAVAILABLE, None, None),
     ],

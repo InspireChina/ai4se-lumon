@@ -7,11 +7,15 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
+from uuid import UUID
 
 from lumon.auto_test.config import AutoTestSettings
-from lumon.auto_test.model import ISSUE_PATTERN, Artifact, TestRun
+from lumon.auto_test.jira_reference import MAX_REFERENCE_BYTES, REFERENCE_SUFFIXES, read_reference
+from lumon.auto_test.model import ISSUE_PATTERN, Artifact, ClarificationQuestion, TestRun
 from lumon.auto_test.store import RunStore
 from lumon.errors import PreflightError
 from lumon.tools.jira_delivery import split_jql
@@ -19,6 +23,7 @@ from lumon.tools.safety import sanitize_output
 
 _OBJECT_ID = re.compile(r"^[a-zA-Z0-9:/_.-]{1,240}$")
 _AUTH_ERRORS = {"AUTH_INVALID", "AUTH_REQUIRED", "AUTH_MISSING", "AUTH_EXPIRED"}
+_RESULT_MARKER = re.compile(r"^(?:#+\s*)?Lumon Auto Test run [0-9a-f-]{36}\b")
 
 
 class JiraError(PreflightError):
@@ -28,10 +33,42 @@ class JiraError(PreflightError):
 
 
 @dataclass(frozen=True, slots=True)
+class JiraComment:
+    id: str
+    body: str
+    created: datetime | None
+    updated: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class JiraIssue:
     key: str
     title: str
     evidence: str
+    comments: tuple[JiraComment, ...] = ()
+    questions: tuple[ClarificationQuestion, ...] = ()
+    replies: tuple[str, ...] = ()
+    clarification_run_id: UUID | None = None
+    references: tuple[str, ...] = ()
+    unread_attachments: tuple[str, ...] = ()
+
+    def replies_after(self, comment_id: str) -> tuple[str, ...]:
+        asked = next(
+            (comment.created for comment in self.comments if comment.id == comment_id), None
+        )
+        if asked is None:
+            return ()
+        replies: list[str] = []
+        for comment in self.comments:
+            activity = comment.updated or comment.created
+            if (
+                activity
+                and activity > asked
+                and comment.body
+                and not _RESULT_MARKER.match(comment.body)
+            ):
+                replies.append(comment.body[:6000])
+        return tuple(replies[-20:])
 
 
 class TestJira:
@@ -67,16 +104,87 @@ class TestJira:
             excluded = excluded.union(keys)
 
     async def issue(self, key: str) -> JiraIssue:
-        data = await self._call("get", key, "--full")
+        item = await self._get(key, "--full")
+        title = sanitize_output(_text(item.get("summary")))[:500]
+        description = _text(item.get("description"))
+        comments = tuple(_jira_comment(row) for row in await self.comments(key))
+        bodies = [comment.body for comment in comments if not _RESULT_MARKER.match(comment.body)]
+        evidence = sanitize_output("\n\n".join((title, description, *bodies)))[:32000]
+        files = item.get("attachment", item.get("attachments", []))
+        references, unread = await self._read_references(_records(files) if files else [])
+        return JiraIssue(
+            key, title or key, evidence, comments, references=references, unread_attachments=unread
+        )
+
+    async def _read_references(
+        self, attachments: list[dict[str, object]]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        found: list[str] = []
+        unread: list[str] = []
+        attempts = 0
+        for attachment in attachments[:40]:
+            name = sanitize_output(str(attachment.get("filename", "Attachment")))[:200]
+            suffix = Path(name).suffix.lower()
+            identifier, size = str(attachment.get("id", "")), attachment.get("size")
+            if (
+                suffix not in REFERENCE_SUFFIXES
+                or not identifier.isdecimal()
+                or not isinstance(size, int)
+                or not 0 < size <= MAX_REFERENCE_BYTES
+                or attempts >= 4
+            ):
+                unread.append(name)
+                continue
+            attempts += 1
+            try:
+                with TemporaryDirectory(prefix="lumon-jira-reference-") as directory:
+                    path = Path(directory) / f"reference{suffix}"
+                    await self._call(
+                        "attachment",
+                        "download",
+                        "--attachment-id",
+                        identifier,
+                        "--output-path",
+                        str(path),
+                    )
+                    if path.stat().st_size != size:
+                        raise PreflightError("Jira reference size did not match its metadata.")
+                    contents = await asyncio.to_thread(read_reference, path)
+            except (PreflightError, OSError, ValueError):
+                unread.append(name)
+                continue
+            if contents.strip():
+                found.append(f"{name}\n{sanitize_output(contents)}")
+            else:
+                unread.append(name)
+        return tuple(found), tuple(unread)
+
+    async def _get(self, key: str, *options: str) -> dict[str, object]:
+        data = await self._call("get", key, *options)
         values = _records(data.get("data"))
         if len(values) != 1 or values[0].get("key") != key:
             raise JiraError("Unable to verify the selected Jira issue.")
-        item = values[0]
-        title = sanitize_output(_text(item.get("summary")))[:500]
-        description = _text(item.get("description"))
-        comments = _text(item.get("comments", item.get("comment")))
-        evidence = sanitize_output(f"{title}\n\n{description}\n\n{comments}")[:32000]
-        return JiraIssue(key, title or key, evidence)
+        return values[0]
+
+    async def block(self, key: str) -> None:
+        current = _object((await self._get(key, "--fields", "status")).get("status"))
+        if _is_block(current.get("name")):
+            return
+        category = _object(current.get("statusCategory"), allow_none=True)
+        if not current.get("name") or str(category.get("key", "")).casefold() == "done":
+            raise JiraError("The current Jira status does not allow an Auto Test block.")
+        reply = await self._call("transition", "--id", key)
+        transitions = _records(_object(reply.get("data")).get("transitions"))
+        matches = [item for item in transitions if _is_block(item.get("toName"))]
+        transition_id = _matching_id(matches)
+        if transition_id is None:
+            raise JiraError("Jira did not offer a Block transition for this issue.")
+        if matches[0].get("requirements"):
+            raise JiraError("The Jira Block transition requires additional inputs.")
+        await self._call("transition", "--id", key, "--transition-id", transition_id)
+        status = _object((await self._get(key, "--fields", "status")).get("status"))
+        if not _is_block(status.get("name")):
+            raise JiraError("The Jira Block transition could not be verified.")
 
     async def attachments(self, key: str) -> list[dict[str, object]]:
         response = await self._call("attachment", "query", "--issue-id", key)
@@ -219,6 +327,31 @@ def _text(value: object) -> str:
     return ""
 
 
+def _jira_time(raw: object) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _jira_comment(row: dict[str, object]) -> JiraComment:
+    return JiraComment(
+        id=_matching_id([row]) or "",
+        body=sanitize_output(_text(row.get("body"))).strip(),
+        created=_jira_time(row.get("created")),
+        updated=_jira_time(row.get("updated")),
+    )
+
+
+def _is_block(status: object) -> bool:
+    if not isinstance(status, str):
+        return False
+    return status.strip().casefold().removesuffix(" (migrated)") in {"block", "blocked"}
+
+
 def _matching_id(items: list[dict[str, object]]) -> str | None:
     if not items:
         return None
@@ -244,6 +377,8 @@ class JiraPublisher:
             raise PreflightError("Only a completed or blocked Auto Test run can be published.")
         if self.gateway.site != run.jira_site:
             raise PreflightError("The run belongs to a different Jira site.")
+        if run.plan and run.plan.questions:
+            return await self._publish_questions(run)
         errors: list[str] = []
         if run.plan is not None and run.workbook is None:
             errors.append("The Excel workbook is unavailable.")
@@ -262,6 +397,17 @@ class JiraPublisher:
             errors.append(str(exc))
         status = ("partial" if run.jira.comment_id else "failed") if errors else "published"
         return self._save(run, status=status, detail="\n".join(errors)[:3000])
+
+    async def _publish_questions(self, run: TestRun) -> TestRun:
+        try:
+            run = await self._comment(run)
+            if not run.jira.block_confirmed:
+                await self.gateway.block(run.issue_key)
+        except JiraError as exc:
+            run = self.store.load(run.run_id)
+            status = "partial" if run.jira.comment_id else "failed"
+            return self._save(run, status=status, detail=str(exc))
+        return self._save(run, status="published", detail="", block_confirmed=True)
 
     async def _attachment(self, run: TestRun, artifact: Artifact) -> TestRun:
         def verify(items: list[dict[str, object]]) -> str | None:
@@ -353,6 +499,14 @@ class JiraPublisher:
 def comment_body(run: TestRun, marker: str) -> str:
     from hashlib import sha256
 
+    if run.plan and run.plan.questions:
+        lines = [f"## {marker}", "", "**Questions blocking Auto Test**", ""]
+        lines.extend(
+            f"{number}. {item.question}" for number, item in enumerate(run.plan.questions, 1)
+        )
+        lines.extend(("", "Please answer here, then return the issue to the Auto Test queue."))
+        body = sanitize_output("\n".join(lines))
+        return f"{body}\n\nAuto Test revision {sha256(body.encode()).hexdigest()[:20]}"
     counts = ", ".join(
         f"{status}: {sum(item.status == status for item in run.results)}"
         for status in ("passed", "failed", "review", "blocked", "not_run")

@@ -40,6 +40,13 @@ def test_delivery_document_preserves_literal_hook_text_and_lifecycle() -> None:
     assert "--poll-id poll-123" in prompt
     assert "AUTO_DELIVERY_IDLE" in prompt
     assert "exactly one terminal command" in prompt
+    assert "chromium.launch(headless=True)" in prompt
+    assert "Skip Desktop Browser Use and its readiness check for this local render" in prompt
+    assert "Verify mail sending and actual mail clients separately" in prompt
+    blocker = prompt.split("## Jira blocker handoff", 1)[1].split("## Durable checkpoint", 1)[0]
+    assert "Write in the Story's language" in blocker
+    assert blocker.index("**Blocker**") < blocker.index("**Next action**")
+    assert blocker.index("**Next action**") < blocker.index("Lumon Delivery Blocker:")
     assert "$instructions" not in prompt
 
 

@@ -314,7 +314,9 @@ def test_partial_jira_reentry_history_fails_closed(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("reply", ["missing", "threaded", "flat", "legacy", "incomplete"])
+@pytest.mark.parametrize(
+    "reply", ["missing", "threaded", "threaded-int", "flat", "legacy", "incomplete"]
+)
 def test_blocked_reentry_uses_fresh_human_comments(
     monkeypatch: pytest.MonkeyPatch, reply: str
 ) -> None:
@@ -363,15 +365,16 @@ def test_blocked_reentry_uses_fresh_human_comments(
                     {"data": rows, "pageInfo": {"hasNextPage": True, "nextCursor": "next"}}
                 ).encode()
             assert arguments[-2:] == ("--after", "next")
+            parent_id = {"threaded": blocker_id, "threaded-int": 20}.get(reply)
             data = (
                 [
                     {
                         "id": "23",
                         "created": "2026-11-27T05:59:00Z"
-                        if reply == "threaded"
+                        if parent_id is not None
                         else "2026-11-27T06:10:00Z",
                         "author": author,
-                        "parentId": blocker_id if reply == "threaded" else None,
+                        "parentId": parent_id,
                     }
                 ]
                 if reply != "missing"

@@ -1,5 +1,5 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
-"""Export the MBPass case layout with a separate evidence sheet."""
+"""Export test cases and their evidence sheets."""
 
 from __future__ import annotations
 
@@ -97,10 +97,63 @@ def _preview_rows(
         values: dict[str, str] = {}
         for cell in row.findall("c", _XML_NS):
             column = cell.attrib["r"].rstrip("0123456789")
-            value = cell.findtext("v", "", _XML_NS)
-            values[column] = strings[int(value)] if cell.get("t") == "s" else value
+            values[column] = _cell_value(cell, strings)
         rows.append(tuple(values.get(column, "") for column in columns))
     return tuple(rows)
+
+
+def _cell_value(cell: ET.Element, strings: tuple[str, ...]) -> str:
+    value = cell.findtext("v", "", _XML_NS)
+    if cell.get("t") == "s":
+        return strings[int(value)]
+    if cell.get("t") == "inlineStr":
+        return "".join(piece.text or "" for piece in cell.findall(".//t", _XML_NS))
+    return value
+
+
+def read_reference_workbook(path: Path, *, limit: int) -> str:
+    """Read bounded cell text without calculating formulas or following workbook links."""
+
+    try:
+        with ZipFile(path) as book:
+            names = set(book.namelist())
+            strings = ()
+            if "xl/sharedStrings.xml" in names:
+                shared = _read_xml(book, "xl/sharedStrings.xml")
+                strings = tuple(
+                    "".join(piece.text or "" for piece in item.findall(".//t", _XML_NS))
+                    for item in shared
+                )
+            return _reference_rows(book, names, strings, limit=limit)
+    except (
+        BadZipFile,
+        ET.ParseError,
+        OSError,
+        ValueError,
+        KeyError,
+        IndexError,
+        RuntimeError,
+    ) as exc:
+        raise PreflightError("Unable to read the Jira reference workbook.") from exc
+
+
+def _reference_rows(book: ZipFile, names: set[str], strings: tuple[str, ...], *, limit: int) -> str:
+    parts: list[str] = []
+    remaining = limit
+    for index in range(1, 13):
+        name = f"xl/worksheets/sheet{index}.xml"
+        if name not in names:
+            break
+        sheet = _read_xml(book, name)
+        for row in sheet.findall("sheetData/row", _XML_NS)[:200]:
+            cells = [_cell_value(cell, strings).strip() for cell in row.findall("c", _XML_NS)]
+            line = " | ".join(cell for cell in cells if cell)
+            if line:
+                parts.append(line[:remaining])
+                remaining -= len(line) + 1
+            if remaining <= 0:
+                return "\n".join(parts)
+    return "\n".join(parts)
 
 
 def export_workbook(run: TestRun, evidence_dir: Path) -> Artifact:

@@ -13,6 +13,7 @@ from uuid import UUID
 import typer
 
 from lumon.agents.agent.config import AgentConfig, AgentConfigStore
+from lumon.auto_test.scheduler import AutoTestScheduler
 from lumon.cli.output import emit_error
 from lumon.errors import (
     AgentConfigError,
@@ -237,6 +238,7 @@ def remove(
         if not yes:
             typer.confirm(question, abort=True)
 
+        AutoTestScheduler(registry.layout.root).remove(registration.workspace_id)
         if default_cleared:
             if config is None:  # pragma: no cover - guarded by default_cleared
                 raise AgentConfigError("Agent configuration is unavailable.")

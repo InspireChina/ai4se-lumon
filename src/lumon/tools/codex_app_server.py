@@ -38,9 +38,16 @@ async def execute_steerable(
     except FileNotFoundError:
         return session.failure(CodexErrorCode.CLI_NOT_FOUND)
     except CodexRpcError as exc:
-        if exc.session_unavailable:
-            return session.failure(CodexErrorCode.SESSION_UNAVAILABLE)
-        return session.failure(CodexErrorCode.EXECUTION_FAILED)
+        detail = "The Codex conversation is open in another process." if exc.thread_busy else ""
+        code = (
+            CodexErrorCode.SESSION_UNAVAILABLE
+            if exc.session_unavailable
+            else CodexErrorCode.EXECUTION_FAILED
+        )
+        return session.failure(
+            code,
+            diagnostic=f"Codex app-server request failed ({exc.method}, code={exc.code}). {detail}",
+        )
     except (OSError, ValueError):
         return session.failure(CodexErrorCode.EXECUTION_FAILED)
     except LumonError:
@@ -107,7 +114,15 @@ class _Execution:
             params["model"] = self.tool.model
         if self.request.resume_session_id:
             params["threadId"] = self.request.resume_session_id
-            response = await self.rpc.request("thread/resume", params)
+            try:
+                response = await self.rpc.request("thread/resume", params)
+            except CodexRpcError as exc:
+                if not exc.thread_busy:
+                    raise
+                # A fork preserves history while the original process retains its writer lock.
+                response = await self.rpc.request(
+                    "thread/fork", {**params, "sandbox": "danger-full-access"}
+                )
         else:
             params["sandbox"] = "danger-full-access"
             response = await self.rpc.request("thread/start", params)
@@ -286,13 +301,21 @@ class _Execution:
             finally:
                 self.callbacks.task_done()
 
-    def failure(self, code: CodexErrorCode, *, timed_out: bool = False) -> CodexExecutionResult:
+    def failure(
+        self,
+        code: CodexErrorCode,
+        *,
+        timed_out: bool = False,
+        diagnostic: str | None = None,
+    ) -> CodexExecutionResult:
         return CodexExecutionResult(
             status="timed_out" if timed_out else "failed",
             error_code=code,
             agent_session_id=self.thread_id,
             events=tuple(self.events),
-            failure_diagnostic="Codex app-server did not complete; active execution was stopped.",
+            failure_diagnostic=(
+                diagnostic or "Codex app-server did not complete; active execution was stopped."
+            ),
         )
 
     async def close(self) -> None:

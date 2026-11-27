@@ -13,7 +13,7 @@ import pytest
 from lumon.agents.agent.steering_policy import steering_policy
 from lumon.tools.codex import CodexErrorCode, CodexRequest, CodexTool
 from lumon.tools.codex_app_server import execute_steerable
-from lumon.tools.steering import SteeringControl, SteeringInput
+from lumon.tools.steering import SteeringControl, SteeringInput, SteeringPolicy
 
 _SERVER = r"""
 import json, os, subprocess, sys
@@ -21,6 +21,7 @@ from pathlib import Path
 root = Path(os.environ['TEST_ROOT'])
 mode = os.environ.get('TEST_MODE', 'steer')
 turn = 0
+thread_id = 'thread-1'
 child = None
 def send(data):
     print(json.dumps(data), flush=True)
@@ -28,9 +29,9 @@ def reply(req, result):
     send({'id': req['id'], 'result': result})
 def done(status='completed'):
     send({'method': 'turn/completed', 'params': {
-        'threadId': 'thread-1', 'turn': {'id': 'turn-'+str(turn), 'status': status}}})
+        'threadId': thread_id, 'turn': {'id': 'turn-'+str(turn), 'status': status}}})
 def finish(text):
-    send({'method': 'item/completed', 'params': {'threadId':'thread-1',
+    send({'method': 'item/completed', 'params': {'threadId':thread_id,
         'turnId': 'turn-'+str(turn), 'item': {
         'type':'agentMessage', 'id':'answer', 'text':text, 'phase':'final_answer'}}})
     done()
@@ -44,11 +45,22 @@ for line in sys.stdin:
         print('private token=do-not-expose', flush=True)
         sys.exit(1)
     if method == 'initialize': reply(req, {})
+    elif method == 'thread/resume' and mode.startswith('busy'):
+        send({'id':req['id'],'error':{'code':-32600,
+            'message':'thread previous-session already has an active writer'}})
+    elif method == 'thread/resume' and mode == 'resume_error':
+        send({'id':req['id'],'error':{'code':-32600,'message':'token=do-not-expose'}})
     elif method == 'thread/resume' and mode in ('missing', 'wrong_thread', 'wrong_code'):
         missing = 'other-session' if mode == 'wrong_thread' else req['params']['threadId']
         code = -32603 if mode == 'wrong_code' else -32600
         send({'id':req['id'],'error':{'code':code,
             'message':'no rollout found for thread id '+missing}})
+    elif method == 'thread/fork':
+        if mode == 'busy_fork_failed':
+            send({'id':req['id'],'error':{'code':-32603,'message':'token=do-not-expose'}})
+        else:
+            thread_id = 'forked-thread'
+            reply(req, {'thread': {'id':thread_id, 'forkedFromId':'previous-session'}})
     elif method in ('thread/start', 'thread/resume'):
         reply(req, {'thread': {'id':'thread-1'}})
     elif method == 'turn/start' and mode == 'turn_error':
@@ -65,7 +77,7 @@ for line in sys.stdin:
                 'turn':{'id':'other-turn','status':'failed'}}})
         reply(req, {'turn': {'id':'turn-'+str(turn)}})
         if mode == 'eof': sys.exit(0)
-        if turn > 1 or mode in ('immediate','unrelated'): finish('updated answer')
+        if turn > 1 or mode in ('immediate','unrelated','busy'): finish('updated answer')
         else:
             if mode in ('child', 'ignore_interrupt'):
                 child = subprocess.Popen([sys.executable, '-c',
@@ -179,17 +191,53 @@ def test_steerable_execution_does_not_start_if_skill_settings_fail(
     assert not (tmp_path / "requests").exists()
 
 
+@pytest.mark.parametrize("policy", [None, "pause"])
+def test_busy_conversation_forks_history_before_the_first_turn(
+    tmp_path: Path, policy: SteeringPolicy | None
+) -> None:
+    tool = fake_tool(tmp_path, "busy")
+    tool.model = "fixture-model"
+    tool.reasoning_effort = "high"
+    result = asyncio.run(
+        execute_steerable(
+            tool,
+            CodexRequest(tmp_path, "inspect", resume_session_id="previous-session"),
+            SteeringControl(policy=policy),
+        )
+    )
+    assert result.status == "succeeded"
+    assert result.agent_session_id == "forked-thread"
+    assert result.final_text == "updated answer"
+    calls = requests(tmp_path)
+    methods = [item["method"] for item in calls]
+    assert methods == ["initialize", "initialized", "thread/resume", "thread/fork", "turn/start"]
+    expected = {
+        "threadId": "previous-session",
+        "cwd": str(tmp_path),
+        "approvalPolicy": "never",
+        "model": "fixture-model",
+    }
+    assert calls[2]["params"] == expected
+    assert calls[3]["params"] == {**expected, "sandbox": "danger-full-access"}
+    turn = cast(dict[str, object], calls[-1]["params"])
+    assert turn["threadId"] == "forked-thread" and turn["effort"] == "high"
+    if policy == "pause":
+        assert turn["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+
+
 @pytest.mark.parametrize(
-    ("mode", "error_code"),
+    ("mode", "method", "error_code"),
     [
-        ("missing", CodexErrorCode.SESSION_UNAVAILABLE),
-        ("wrong_thread", CodexErrorCode.EXECUTION_FAILED),
-        ("wrong_code", CodexErrorCode.EXECUTION_FAILED),
-        ("turn_error", CodexErrorCode.EXECUTION_FAILED),
+        ("resume_error", "thread/resume", CodexErrorCode.EXECUTION_FAILED),
+        ("busy_fork_failed", "thread/fork", CodexErrorCode.EXECUTION_FAILED),
+        ("missing", "thread/resume", CodexErrorCode.SESSION_UNAVAILABLE),
+        ("wrong_thread", "thread/resume", CodexErrorCode.EXECUTION_FAILED),
+        ("wrong_code", "thread/resume", CodexErrorCode.EXECUTION_FAILED),
+        ("turn_error", "turn/start", CodexErrorCode.EXECUTION_FAILED),
     ],
 )
-def test_resume_only_marks_the_requested_session_missing(
-    tmp_path: Path, mode: str, error_code: CodexErrorCode
+def test_resume_recovery_is_bounded_and_does_not_replay_arbitrary_failures(
+    tmp_path: Path, mode: str, method: str, error_code: CodexErrorCode
 ) -> None:
     result = asyncio.run(
         execute_steerable(
@@ -200,9 +248,13 @@ def test_resume_only_marks_the_requested_session_missing(
     )
     assert result.status == "failed"
     assert result.error_code == error_code
+    assert "do-not-expose" not in str(result)
+    assert result.failure_diagnostic is not None
+    assert method in result.failure_diagnostic
     methods = [item["method"] for item in requests(tmp_path)]
     assert "thread/start" not in methods
-    assert methods.count("turn/start") == int(mode == "turn_error")
+    assert methods.count("turn/start") == int(method == "turn/start")
+    assert methods.count("thread/fork") == int(method == "thread/fork")
 
 
 def test_native_steering_updates_same_turn_and_accepts_images(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ const settings: WorkspaceSettings = {
 };
 const testSettings: AutoTestSettings = {
   enabled: false, schedule_expression: "*/5 * * * *", jira_site: "example.atlassian.net",
-  jira_project: "TEST", trigger_jql: 'project = TEST AND status = "Ready For QA"', model: "gpt-test",
+  jira_project: "TEST", trigger_jql: 'project = TEST AND status = "Ready For QA"',
 };
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); window.history.replaceState(null, "", "/"); });
@@ -279,6 +279,16 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
     expect(container.querySelector(`${jira} textarea`)).toBeNull();
     expect(container.querySelector(".auto-delivery-settings-panel #auto-delivery-jql")).not.toBeNull();
     expect(container.querySelector("#auto-test-settings #auto-test-jql")).not.toBeNull();
+    expect(container.querySelectorAll("#auto-test-settings fieldset input")).toHaveLength(1);
+    const deliveryToggle = ".auto-delivery-settings-panel .settings-toggle";
+    const testToggle = "#auto-test-settings .settings-toggle";
+    const toggleLabel = (selector: string) => container.querySelector(`${selector} > span`)?.textContent;
+    expect(toggleLabel(testToggle)).toBe(toggleLabel(deliveryToggle));
+    await click(`${deliveryToggle} input`);
+    await click(`${testToggle} input`);
+    expect(toggleLabel(testToggle)).toBe(toggleLabel(deliveryToggle));
+    await click(`${deliveryToggle} input`);
+    await click(`${testToggle} input`);
     expect(field("#auto-test-jql").value).toBe(testSettings.trigger_jql);
     expect(field("#jira-project").value).toBe("TEST");
     const jqlHelp = document.querySelector("#auto-delivery-jql-help")!.textContent!;
@@ -294,7 +304,6 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
     await edit("#auto-delivery-jql", 'status = "Ready for Dev"');
     await edit("#auto-delivery-hooks", "Verify release evidence.");
     await edit("#auto-test-jql", 'status = "Ready for Test"');
-    await edit('#auto-test-settings input[name="model"]', "gpt-new");
     await click('.side-nav button[aria-label="Auto Test"]');
     expect(confirm).toHaveBeenCalledTimes(3);
 
@@ -311,11 +320,9 @@ it.each(["en", "zh-CN", "zh-TW"] as const)("saves automation panels independentl
     expect(field("#auto-delivery-jql").value).toBe('status = "Ready for Dev"');
     expect(field("#auto-test-jql").value).toBe('status = "Ready for Test"');
     expect(saveTest).not.toHaveBeenCalled();
-    expect(savedTestSettings.model).toBe(testSettings.model);
-    expect(field('#auto-test-settings input[name="model"]').value).toBe("gpt-new");
     await submit("#auto-test-settings form");
     expect(saveTest).toHaveBeenLastCalledWith("workspace-one", {
-      enabled: false, schedule_expression: testSettings.schedule_expression, model: "gpt-new",
+      enabled: false, schedule_expression: testSettings.schedule_expression,
       trigger_jql: 'status = "Ready for Test"',
     });
     expect(savedTestSettings.jira_project).toBe("QA");

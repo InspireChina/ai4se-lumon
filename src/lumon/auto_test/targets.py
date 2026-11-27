@@ -14,7 +14,9 @@ from lumon.auto_test.config import (
     Identifier,
     IosTarget,
     SettingsModel,
+    TestEnvironment,
     WebTarget,
+    production_marker,
     relative_path,
 )
 from lumon.auto_test.process import command
@@ -26,10 +28,19 @@ _QA_VARIANT = re.compile(r"\.(uat|qa|staging|local)(?=\.[^.]+$)", re.IGNORECASE)
 _IOS_NAME = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,119}$")]
 _RUNTIME = re.compile(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+")
 _NODE_VERSION = re.compile(r"v?([0-9]+(?:\.[0-9]+){0,2})")
+_TEST_VARIANTS: dict[str, TestEnvironment] = {
+    "test": "test",
+    "qa": "test",
+    "staging": "staging",
+    "dev": "development",
+    "development": "development",
+    "uat": "uat",
+}
 
 
 class WebChoice(SettingsModel):
     repository: Identifier
+    environment: TestEnvironment
     directory: str
     script: str | None
     output: str
@@ -57,6 +68,7 @@ def web_target(choice: WebChoice, source: Path) -> WebTarget:
 
     target = WebTarget(
         repository=choice.repository,
+        environment=choice.environment,
         directory=choice.directory,
         output=choice.output,
         base_path=choice.base_path,
@@ -70,6 +82,10 @@ def web_target(choice: WebChoice, source: Path) -> WebTarget:
     if choice.script is None:
         if not _source_path(directory, target.output, "index.html").is_file():
             raise PreflightError("The selected static Web target has no index.html.")
+        if choice.environment not in {"test", "development"}:
+            raise PreflightError(
+                "A static Web target requires a local test or development environment."
+            )
         return target
 
     package = _package(directory)
@@ -82,8 +98,47 @@ def web_target(choice: WebChoice, source: Path) -> WebTarget:
         or not isinstance(cast(dict[str, object], scripts).get(script), str)
     ):
         raise PreflightError("The Agent must select a declared Web build script.")
+    if _build_environment((script,)) != choice.environment:
+        raise PreflightError(
+            "The selected Web script does not confirm the Agent's test environment."
+        )
     install, runner = _node_commands(directory, package)
     return target.model_copy(update={"build": (install, (*runner, "run", script))})
+
+
+def web_environment(target: WebTarget) -> TestEnvironment:
+    """Check an explicit override or resolve a named build from an older profile."""
+
+    detected = _build_environment(
+        tuple(
+            argument
+            for step in target.build
+            for argument in step
+            if _BUILD_SCRIPT.fullmatch(argument)
+        )
+    )
+    if detected is not None and target.environment not in {None, detected}:
+        raise PreflightError("The Web build conflicts with its configured test environment.")
+    environment = target.environment or detected
+    if environment is None:
+        if not target.build:
+            return "development"
+        raise PreflightError("Could not confirm a test environment for the Web build.")
+    return environment
+
+
+def _build_environment(scripts: tuple[str, ...]) -> TestEnvironment | None:
+    if any(production_marker(script) for script in scripts):
+        raise PreflightError("Production builds are unavailable in Auto Test.")
+    variants: set[TestEnvironment] = {
+        _TEST_VARIANTS[token]
+        for script in scripts
+        for token in re.split(r"[:._-]", script.lower())
+        if token in _TEST_VARIANTS
+    }
+    if len(variants) > 1:
+        raise PreflightError("The Web build specifies more than one test environment.")
+    return next(iter(variants), None)
 
 
 async def ios_target(choice: IosChoice, source: Path) -> IosTarget:

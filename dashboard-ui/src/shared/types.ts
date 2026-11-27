@@ -8,7 +8,6 @@ export interface AutoTestSettings {
   jira_site: string;
   jira_project: string;
   trigger_jql: string;
-  model: string;
 }
 
 export interface AutoTestRun {

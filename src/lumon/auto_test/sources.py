@@ -33,6 +33,7 @@ _SOURCE_SUFFIXES = {
     ".java",
     ".php",
     ".go",
+    ".ftl",
     ".py",
     ".rb",
     ".html",

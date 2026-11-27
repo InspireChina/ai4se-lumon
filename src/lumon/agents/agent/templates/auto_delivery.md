@@ -35,15 +35,24 @@ Follow these rules:
 
 ## Visual assistance during implementation
 
+For generated email HTML, use installed Playwright from the worker shell. Launch
+your own headless Chromium with `chromium.launch(headless=True)` for this check.
+Use a fresh context with `offline=True`, `java_script_enabled=False` and
+`service_workers="block"`. Load the self-contained, redacted HTML with `page.set_content`
+and inspect screenshots saved in this run's artifacts. Close Chromium when finished.
+Skip Desktop Browser Use and its readiness check for this local render. Record the
+result as local HTML rendering. Verify mail sending and actual mail clients separately
+when the Story requires them.
+
 Determine from the requirements and actual changes whether UI or user interaction
-is affected. For UI changes, use matching Workspace capabilities to run the real
+is affected. For other UI changes, use matching Workspace capabilities to run the real
 application in Debug/development mode, inspect it, interact, and capture evidence
 while implementing. Keep the edit / hot reload / inspect loop inside implementation;
 do not require a separate visual Agent or a release package. Rebuild and reinstall
 when native changes require it. Technical checks still apply.
 
-Refresh host prerequisites with `lumon doctor --visual --json` before using visual
-tools. Tool readiness is not application readiness: verify project dependencies,
+Refresh host prerequisites with `lumon doctor --visual --json` before using those
+visual tools. Tool readiness is not application readiness: verify project dependencies,
 build, launch, backend connectivity and required pages separately. If a required
 visual check cannot run, record the reason and block instead of claiming validation.
 For non-UI work, record why visual checks do not apply and use relevant technical checks.
@@ -122,16 +131,24 @@ Lifecycle commands send the normal Feishu notifications; do not send extras.
 ## Jira blocker handoff
 
 These rules override older Workspace directions for Blocked comments. Before calling
-`lumon delivery block`, leave one blocker comment on the selected Jira Story for the
-current attempt. Describe the phase, the blocker, the work already verified and the
-specific action or decision you need. Ask the operator to reply on the Story and move
-it back to the configured entry status after addressing the blocker. Omit credentials,
-private paths and raw logs.
+`lumon delivery block`, leave one short comment on the selected Jira Story for the
+current attempt. Write in the Story's language and translate both labels below.
 
-Use `Lumon Delivery Blocker: <story-run-id> (attempt <n>)` as the exact marker for this
-attempt. Use TWG on the configured Jira site. Query comments and follow pagination
-before writing. Reuse the verified blocker comment with that marker if it already
-exists. Otherwise create it with `twg jira workitem comment create --issue-id
+- **Blocker** Name the affected check, the tool or dependency that failed and the
+  exact failed action. Include the short error message when available. If the cause
+  is unknown, describe what happened without guessing.
+- **Next action** Say who needs to do what. Name the specific access, input or
+  decision you need. If a fallback is available, say what it can verify and what
+  remains unverified. Ask the operator to reply with the outcome and move the Story
+  back to the configured entry status once the blocker is addressed.
+
+Add prior verification only when it helps the operator decide what to do. Omit
+credentials, private paths and raw logs.
+
+Put the exact marker `Lumon Delivery Blocker: <story-run-id> (attempt <n>)` on its own
+line at the end of the comment. Use TWG on the configured Jira site. Query comments
+and follow pagination before writing. Reuse the verified comment for that marker if
+it exists. Otherwise create it with `twg jira workitem comment create --issue-id
 <Story-key> --site $jira_site --body-format markdown --body <body>`. After a timeout,
 query and reconcile the marker before any retry. Once read-back confirms the comment,
 save its numeric ID with `lumon delivery checkpoint --run-id <story-run-id> --detail

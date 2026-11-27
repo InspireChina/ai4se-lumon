@@ -175,6 +175,16 @@ class AgentConfigStore:
         config.validate()
         return config
 
+    def load_or_default(self) -> AgentConfig:
+        """Use the standard Agent settings when no profile has been saved."""
+
+        try:
+            return self.load()
+        except AgentConfigError:
+            if not self.path.exists():
+                return AgentConfig()
+            raise
+
     def save(self, config: AgentConfig) -> None:
         """Validate and atomically write Agent configuration with mode ``600``."""
 

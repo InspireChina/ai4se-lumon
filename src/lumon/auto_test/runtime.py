@@ -21,12 +21,21 @@ from uuid import UUID
 
 import httpx
 from playwright.async_api import Browser, Page, Route, WebSocketRoute, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
-from lumon.auto_test.config import AutoTestSettings, IosTarget, Platform, WebTarget, https_origin
+from lumon.auto_test.config import (
+    AutoTestSettings,
+    IosTarget,
+    Platform,
+    TestEnvironment,
+    WebTarget,
+    https_origin,
+)
 from lumon.auto_test.drivers import IosScreen, Screen, WebScreen, origin
+from lumon.auto_test.isolation import isolated_chromium, offline_build
 from lumon.auto_test.process import build_environment, command, owned_process
 from lumon.auto_test.sources import Sources
-from lumon.auto_test.targets import IosChoice, WebChoice, ios_target, web_target
+from lumon.auto_test.targets import IosChoice, WebChoice, ios_target, web_environment, web_target
 from lumon.errors import PreflightError
 
 
@@ -42,6 +51,7 @@ class WebBuild:
     profile: WebTarget
     browser: Browser
     origin: str
+    approved_origins: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +76,7 @@ class TestRuntime:
     async def build(
         self, platform: Platform, *, choice: WebChoice | IosChoice | None = None
     ) -> str:
+        _require_isolated_platform(platform)
         target = self.settings.web if platform == "web" else self.settings.ios
         selection = target or choice
         if selection is None:
@@ -77,28 +88,42 @@ class TestRuntime:
             target = await ios_target(choice, source.path)
         if target is None:
             raise PreflightError(f"The selected build target does not match {platform}.")
+        if isinstance(target, WebTarget):
+            environment = web_environment(target)
+            approved = self.settings.qa_environments.get(environment, ())
+            if environment in {"staging", "uat"} and not approved:
+                raise PreflightError(
+                    f"No HTTPS origins are approved for the {environment} environment."
+                )
+            target = target.model_copy(update={"environment": environment})
         checkout = await source.copy_for_build(self.directory / platform)
         directory = (
             _inside(checkout, target.directory) if isinstance(target, WebTarget) else checkout
         )
         for number, arguments in enumerate(target.build, 1):
             await command(
-                arguments, label=f"{platform} build step {number}", cwd=directory, timeout=1800
+                offline_build(arguments),
+                label=f"{platform} offline build step {number}",
+                cwd=directory,
+                timeout=1800,
             )
         if isinstance(target, WebTarget):
             return await self._build_web(target, directory, source.revision.sha)
         return await self._build_ios(target, checkout, source.revision.sha)
 
     async def _build_web(self, target: WebTarget, checkout: Path, sha: str) -> str:
+        environment: TestEnvironment = web_environment(target)
         output = _inside(checkout, target.output)
         if not (output / "index.html").is_file():
             raise PreflightError("The Web build did not produce an index.html file.")
         address = await self.stack.enter_async_context(_serve(output, target.base_path))
         playwright = await self.stack.enter_async_context(async_playwright())
-        browser = await playwright.chromium.launch(headless=True, chromium_sandbox=True)
-        self.stack.push_async_callback(browser.close)
-        self.web = WebBuild(target, browser, address)
-        return f"{target.repository}@{sha} · Chromium {browser.version}"
+        browser = await self.stack.enter_async_context(
+            isolated_chromium(playwright.chromium, self.directory)
+        )
+        approved = self.settings.qa_environments.get(environment, ())
+        self.web = WebBuild(target, browser, address, approved)
+        return f"{target.repository}@{sha} · {environment} · Chromium {browser.version}"
 
     async def _build_ios(self, target: IosTarget, checkout: Path, sha: str) -> str:
         if shutil.which("appium") is None:
@@ -140,12 +165,17 @@ class TestRuntime:
         return f"{target.repository}@{sha} · {target.bundle_id} {version} · {target.runtime}"
 
     async def verify_backends(self, repositories: tuple[str, ...]) -> None:
+        if not repositories:
+            return
+        approved = self.web.approved_origins if self.web is not None else ()
         probes = {backend.repository: backend.version_url for backend in self.settings.backends}
         async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
             for repository in dict.fromkeys(repositories):
                 url = probes.get(repository)
-                if url is None or https_origin(url) not in self.settings.qa_origins:
-                    raise PreflightError(f"Configure the QA version probe for {repository}.")
+                if url is None or https_origin(url) not in approved:
+                    raise PreflightError(
+                        f"Use a version probe for {repository} in the selected test environment."
+                    )
                 source = await self.sources.pin(repository)
                 try:
                     response = await client.get(url)
@@ -165,8 +195,9 @@ class TestRuntime:
 
     @asynccontextmanager
     async def record(self, platform: Platform, path: Path) -> AsyncGenerator[Recording]:
+        _require_isolated_platform(platform)
         if platform == "web" and self.web is not None:
-            async with _web_recording(self.web, self.settings.qa_origins, path) as recording:
+            async with _web_recording(self.web, path) as recording:
                 yield recording
         elif platform == "ios" and self.ios is not None:
             async with _ios_recording(self.ios, path) as recording:
@@ -175,11 +206,34 @@ class TestRuntime:
             raise PreflightError(f"The {platform} QA build is unavailable.")
 
 
+def _require_isolated_platform(platform: Platform) -> None:
+    if platform == "ios":
+        raise PreflightError("iOS Auto Test requires a network-isolated simulator.")
+
+
+async def forward_web_request(route: Route, origins: frozenset[str]) -> bool:
+    url = route.request.url
+    if origin(url) not in origins:
+        return False
+    # Forward each redirect only after checking its target against the run's scope.
+    response = await route.fetch(max_redirects=0, timeout=20000)
+    try:
+        location = response.headers.get("location")
+        if (
+            location
+            and 300 <= response.status < 400
+            and origin(urljoin(url, location)) not in origins
+        ):
+            return False
+        await route.fulfill(response=response)
+        return True
+    finally:
+        await response.dispose()
+
+
 @asynccontextmanager
-async def _web_recording(
-    build: WebBuild, qa_origins: tuple[str, ...], path: Path
-) -> AsyncGenerator[Recording]:
-    origins = frozenset((build.origin, *qa_origins))
+async def _web_recording(build: WebBuild, path: Path) -> AsyncGenerator[Recording]:
+    origins = frozenset((build.origin, *build.approved_origins))
     context = await build.browser.new_context(
         viewport={"width": 1280, "height": 800},
         device_scale_factor=1,
@@ -188,43 +242,37 @@ async def _web_recording(
     )
 
     async def route_request(route: Route) -> None:
-        if origin(route.request.url) not in origins:
-            await route.abort()
+        if await forward_web_request(route, origins):
             return
-        # Inspect each redirect before letting the browser follow it.
-        response = await route.fetch(max_redirects=0, timeout=20000)
-        location = response.headers.get("location")
-        if (
-            location
-            and 300 <= response.status < 400
-            and origin(urljoin(route.request.url, location)) not in origins
-        ):
-            await response.dispose()
-            await route.abort()
-            return
-        try:
-            await route.fulfill(response=response)
-        finally:
-            await response.dispose()
+        screen.network_error = (
+            "The Web app requested a service outside the selected test environment."
+        )
+        await route.abort()
 
     async def route_socket(route: WebSocketRoute) -> None:
-        if origin(route.url) in origins:
-            route.connect_to_server()
-        else:
-            await route.close()
+        screen.network_error = "WebSockets are unavailable in the isolated Auto Test browser."
+        await route.close()
 
     async def close_popup(popup: Page) -> None:
         await popup.close()
 
     try:
+        page = await context.new_page()
+        screen = WebScreen(page, origins)
         await context.route("**/*", route_request)
         await context.route_web_socket("**/*", route_socket)
-        page = await context.new_page()
         page.on("popup", close_popup)
-        await page.goto(
-            build.origin + build.profile.start_path, wait_until="domcontentloaded", timeout=25000
-        )
-        screen = WebScreen(page, origins)
+        try:
+            await page.goto(
+                build.origin + build.profile.start_path,
+                wait_until="domcontentloaded",
+                timeout=25000,
+            )
+        except PlaywrightError as exc:
+            if screen.network_error:
+                raise PreflightError(screen.network_error) from exc
+            raise
+        await screen.require_target()
         await screen.setup(build.profile.setup)
         await screen.require_target()
         await page.screencast.start(path=path, size={"width": 1280, "height": 800})
@@ -232,6 +280,7 @@ async def _web_recording(
             yield Recording(screen, path, time.monotonic())
         finally:
             await page.screencast.stop()
+        await screen.require_target()
     finally:
         await context.close()
 

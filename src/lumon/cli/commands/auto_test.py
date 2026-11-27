@@ -26,11 +26,15 @@ def poll(
         bool, typer.Option("--manual", help="Check Jira once even with scheduling off.")
     ] = False,
     retest: Annotated[UUID | None, typer.Option("--retest")] = None,
+    pilot_issue: Annotated[
+        str | None,
+        typer.Option("--issue-key", help="Pilot one issue in the configured Jira project."),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Check the saved JQL and execute one eligible issue."""
     try:
-        result = asyncio.run(_poll(workspace_id, manual or retest is not None, retest))
+        result = asyncio.run(_poll(workspace_id, manual, retest, pilot_issue))
     except asyncio.CancelledError as exc:
         raise typer.Exit(code=130) from exc
     except LumonError as exc:
@@ -44,9 +48,13 @@ def poll(
         raise typer.Exit(code=1)
 
 
-async def _poll(workspace_id: UUID, manual: bool, retest: UUID | None) -> PollResult:
+async def _poll(
+    workspace_id: UUID, manual: bool, retest: UUID | None, pilot_issue: str | None
+) -> PollResult:
     loop = asyncio.get_running_loop()
-    task = asyncio.create_task(AutoTestService().poll(workspace_id, manual=manual, retest=retest))
+    task = asyncio.create_task(
+        AutoTestService().poll(workspace_id, manual=manual, retest=retest, pilot_issue=pilot_issue)
+    )
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
     try:
         return await task

@@ -13,31 +13,42 @@ import time
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
-from typing import Literal
+from textwrap import dedent
+from typing import Literal, cast
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 from zipfile import ZipFile
 
 import httpx
-import httpx2
 import pytest
 from fastapi.testclient import TestClient
-from openai import AsyncOpenAI
-from openai.lib.computer import ComputerActionInput
-from openai.types.responses.computer_action import Click
+from playwright.async_api import APIResponse, Route
+from pydantic import ValidationError
 
+from lumon.agents.agent.config import AgentConfig, AgentConfigStore
 from lumon.auto_test import service as auto_test
-from lumon.auto_test.config import AutoTestSettings, IosTarget, Platform, WebTarget
-from lumon.auto_test.drivers import IosScreen, Screen
+from lumon.auto_test.codex_runner import CodexTestRunner
+from lumon.auto_test.config import AutoTestSettings, IosTarget, Platform, QABackend, WebTarget
+from lumon.auto_test.drivers import IosScreen, PointerAction, Screen, UiAction
 from lumon.auto_test.jira import JiraError, JiraIssue
 from lumon.auto_test.jira import TestJira as Jira
-from lumon.auto_test.model import AcceptanceCriterion, Case, CasePlan, Check, Step
+from lumon.auto_test.model import (
+    AcceptanceCriterion,
+    Case,
+    CasePlan,
+    Check,
+    ClarificationAnswer,
+    ClarificationQuestion,
+    Step,
+)
 from lumon.auto_test.planning import CasePlanner, PlannedTest, validate_plan
 from lumon.auto_test.process import owned_process
-from lumon.auto_test.runtime import Recording
+from lumon.auto_test.runtime import Recording, forward_web_request
 from lumon.auto_test.runtime import TestRuntime as Runtime
 from lumon.auto_test.sources import Sources
-from lumon.auto_test.targets import IosChoice, WebChoice, web_target
+from lumon.auto_test.targets import IosChoice, WebChoice, ios_target, web_target
 from lumon.dashboard.routes import create_app
 from lumon.dashboard.service import DashboardService
 from lumon.errors import PreflightError
@@ -48,11 +59,8 @@ from lumon.workspace.registry import WorkspaceRegistry
 
 _REQUIREMENT = "A signed-in QA user can save a draft."
 _JIRA = "qa-example.atlassian.net"
-_KEY = "QA-7"
-_QA_JQL = (
-    'project = QA\nAND sprint in openSprints()\nAND status = "Ready For QA"\n'
-    "AND Flagged = Impediment\nORDER BY Rank ASC"
-)
+_KEY = "QADEMO-7"
+_QA_JQL = 'project = QADEMO AND status = "Ready for Test" ORDER BY Rank ASC'
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jN1sAAAAASUVORK5CYII="
 )
@@ -68,6 +76,10 @@ class FakeJira(Jira):
         self.comment_writes: list[str] = []
         self.uploads: list[str] = []
         self.upload_failure: Literal["rejected", "unconfirmed"] | None = None
+        self.replies: list[dict[str, object]] = []
+        self.status = "Ready for Test"
+        self.transitions: list[str] = []
+        self.requirements: list[str] = []
 
     async def _call(self, *arguments: str, timeout: float = 30) -> dict[str, object]:
         del timeout
@@ -87,9 +99,29 @@ class FakeJira(Jira):
                 return {
                     "data": [{"key": key, "summary": "Save draft", "description": _REQUIREMENT}]
                 }
-            case ("attachment", "query", "--issue-id", "QA-7"):
+            case ("get", key, "--fields", "status"):
+                return {"data": [{"key": key, "status": {"name": self.status}}]}
+            case ("transition", "--id", "QADEMO-7"):
+                return {
+                    "data": {
+                        "transitions": [
+                            {
+                                "id": "fixture-block",
+                                "toName": "Block (migrated)",
+                                "requirements": self.requirements,
+                            }
+                        ]
+                    }
+                }
+            case ("transition", "--id", "QADEMO-7", "--transition-id", transition):
+                assert self.posts and not self.requirements
+                self.transitions.append(transition)
+                self.status = "Block (migrated)"
+                self.eligible = []
+                return {}
+            case ("attachment", "query", "--issue-id", "QADEMO-7"):
                 return {"data": list(self.files)}
-            case ("attachment", "upload", "--issue-id", "QA-7", "--file", raw_path):
+            case ("attachment", "upload", "--issue-id", "QADEMO-7", "--file", raw_path):
                 path = Path(raw_path)
                 self.uploads.append(path.name)
                 failure = self.upload_failure if path.suffix == ".webm" else None
@@ -110,13 +142,16 @@ class FakeJira(Jira):
                     raise JiraError("The fixture connection closed before returning the response.")
                 return {}
             case ("comment", "query", *_):
-                comments = [{"id": key, "body": body} for key, body in self.posts.items()]
-                return {"data": comments}
+                comments = [
+                    {"id": key, "body": body, "created": "2026-10-12T10:00:00Z"}
+                    for key, body in self.posts.items()
+                ]
+                return {"data": [*comments, *self.replies]}
             case (
                 "comment",
                 "create",
                 "--issue-id",
-                "QA-7",
+                "QADEMO-7",
                 "--body-format",
                 "markdown",
                 "--body",
@@ -131,7 +166,7 @@ class FakeJira(Jira):
                 "--id",
                 comment_id,
                 "--issue-id",
-                "QA-7",
+                "QADEMO-7",
                 "--body-format",
                 "markdown",
                 "--body",
@@ -151,8 +186,8 @@ class FixtureScreen(Screen):
     async def capture(self) -> bytes:
         return _PNG
 
-    async def apply(self, action: ComputerActionInput) -> None:
-        raise AssertionError(action)
+    async def apply(self, action: UiAction) -> None:
+        assert action == PointerAction(type="click", x=0, y=0)
 
     async def element(self, selector: str, *, read_text: bool) -> tuple[bool, str]:
         return True, {"#saved": "Saved", "draft-status": "Draft", "#absent": ""}[selector]
@@ -195,7 +230,7 @@ def _settings(*, enabled: bool = True) -> AutoTestSettings:
     return AutoTestSettings(
         enabled=enabled,
         jira_site=_JIRA,
-        jira_project="QA",
+        jira_project="QADEMO",
         trigger_jql=_QA_JQL,
         web=WebTarget(repository="app", output="dist"),
         ios=IosTarget(
@@ -245,9 +280,7 @@ def _plan(*cases: Case) -> CasePlan:
 def _service(
     registry: WorkspaceRegistry, workspace_id: UUID, jira: FakeJira
 ) -> auto_test.AutoTestService:
-    service = auto_test.AutoTestService(
-        registry, jira=lambda site: jira, openai=lambda: AsyncOpenAI(api_key="fixture")
-    )
+    service = auto_test.AutoTestService(registry, jira=lambda site: jira)
     settings = service.settings_store.load(workspace_id)
     service.settings_store.save(replace(settings, auto_test=_settings()))
     return service
@@ -255,6 +288,9 @@ def _service(
 
 def _fixture_builds(monkeypatch: pytest.MonkeyPatch, plan: CasePlan) -> list[tuple[Platform, str]]:
     builds: list[tuple[Platform, str]] = []
+
+    async def ready(self: CodexTestRunner) -> None:
+        pass
 
     async def generate(self: CasePlanner, *args: object) -> PlannedTest:
         return PlannedTest(plan=plan, web=None, ios=None)
@@ -267,6 +303,7 @@ def _fixture_builds(monkeypatch: pytest.MonkeyPatch, plan: CasePlan) -> list[tup
         builds.append((platform, (copy / "index.html").read_text()))
         return source.revision.sha
 
+    monkeypatch.setattr(CodexTestRunner, "require_ready", ready)
     monkeypatch.setattr(CasePlanner, "generate", generate)
     monkeypatch.setattr(Runtime, "build", build)
     return builds
@@ -287,64 +324,111 @@ def test_agent_discovers_web_build_from_pinned_source_without_a_profile(
 
     choice = WebChoice(
         repository="app",
+        environment="uat",
         directory=".",
         script="build:uat",
         output="dist",
         base_path="/uat",
         start_path="/uat/",
     )
-    response_plan = PlannedTest(plan=_plan(_case("Check QA draft")), web=choice, ios=None)
-    model_requests = 0
+    binary = root.parent / "fake-codex"
+    plan = PlannedTest(plan=_plan(_case("Check QA draft")), web=choice, ios=None)
+    binary.with_suffix(".json").write_text(plan.model_dump_json())
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        + dedent("""\
+            import json
+            import os
+            import sys
+            from pathlib import Path
 
-    def model_response(request: httpx2.Request) -> httpx2.Response:
-        nonlocal model_requests
-        model_requests += 1
-        body = request.content.decode()
-        assert "registered_repositories" in body and "main" in body
-        assert "never-send" not in body
-        output: list[dict[str, object]]
-        if model_requests == 1:
-            output = [
-                {
-                    "type": "function_call",
-                    "id": "fc_build",
-                    "call_id": "call_build",
-                    "name": "source_context",
-                    "status": "completed",
-                    "arguments": json.dumps(
-                        {"repository": "app", "action": "read", "query": "package.json"}
-                    ),
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc_manifest",
-                    "call_id": "call_manifest",
-                    "name": "source_context",
-                    "status": "completed",
-                    "arguments": json.dumps(
-                        {"repository": "app", "action": "read", "query": ".env"}
-                    ),
-                },
-            ]
-        else:
-            assert "fixture-build" in body
-            assert "outside the allowed repository files" in body
-            output = [
-                {
-                    "id": "msg_build",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": response_plan.model_dump_json(),
-                            "annotations": [],
-                        }
-                    ],
-                }
-            ]
-        return httpx2.Response(200, json={"id": f"resp_{model_requests}", "output": output})
+            assert "FIXTURE_SECRET" not in os.environ
+            assert os.environ["CODEX_HOME"] == os.environ["CODEX_SQLITE_HOME"]
+            assert Path(os.environ["CODEX_HOME"]).name == "codex-agent"
+            if sys.argv[1:] == ["login", "status"]:
+                sys.exit(0)
+            assert sys.argv[1] == "app-server"
+            assert "features.shell_tool=false" in sys.argv
+
+            def read(method):
+                message = json.loads(sys.stdin.readline())
+                assert message["method"] == method
+                return message
+
+            def send(message):
+                print(json.dumps(message), flush=True)
+
+            def reply(message, result):
+                send({"id": message["id"], "result": result})
+
+            initialize = read("initialize")
+            assert initialize["params"]["capabilities"]["experimentalApi"]
+            reply(initialize, {})
+            read("initialized")
+            settings = read("config/read")
+            reply(settings, {"config": {"mcp_servers": {"fixture": {"enabled": True}}}})
+            thread = read("thread/start")
+            config = thread["params"]
+            assert config["model"] == "shared-agent-model"
+            assert config["config"]["mcp_servers"] == {"fixture": {"enabled": False}}
+            assert config["ephemeral"] and config["environments"] == []
+            assert config["sandbox"] == "read-only" and config["approvalPolicy"] == "never"
+            tool, = config["dynamicTools"]
+            reply(thread, {"thread": {"id": "thread-1"}})
+            turn = read("turn/start")
+            assert turn["params"]["effort"] == "xhigh"
+            schema = turn["params"]["outputSchema"]
+            assert schema["type"] == "object"
+            if tool["name"] == "source_context":
+                target_schema = schema["$defs"]["CasePlan"]
+                assert {"questions", "answers"} <= set(target_schema["required"])
+                assert "default" not in target_schema["properties"]["questions"]
+            else:
+                assert set(schema["required"]) == {"status", "question"}
+            scope = {"threadId": "thread-1", "turnId": "turn-1"}
+            reply(turn, {"turn": {"id": "turn-1"}})
+            send({"id": "approval", "method": "item/commandExecution/requestApproval",
+                  "params": scope})
+            assert json.loads(sys.stdin.readline())["error"]["code"] == -32601
+
+            def call(identifier, arguments):
+                send({"id": identifier, "method": "item/tool/call",
+                      "params": dict(scope, callId=identifier, tool=tool["name"],
+                                     arguments=arguments)})
+                response = json.loads(sys.stdin.readline())
+                assert response["id"] == identifier and response["result"]["success"]
+                item, = response["result"]["contentItems"]
+                return item
+
+            if tool["name"] == "source_context":
+                evidence = turn["params"]["input"][0]["text"]
+                assert '"registered_test_environments": ["uat"]' in evidence
+                assert "uat.example.test" not in evidence
+                context = call("source", {"repository": "app", "action": "read",
+                                          "query": "package.json"})
+                assert "fixture-build" in context["text"]
+                restricted = call("config", {"repository": "app", "action": "read",
+                                               "query": ".env"})
+                assert "outside the allowed repository files" in restricted["text"]
+                assert "never-send" not in restricted["text"]
+                result = Path(__file__).with_suffix(".json").read_text()
+            else:
+                assert tool["name"] == "test_screen"
+                image = turn["params"]["input"][1]
+                assert image["type"] == "localImage" and Path(image["path"]).is_file()
+                updated = call("click", {"action": {"type": "click", "x": 0, "y": 0}})
+                assert updated["type"] == "inputImage"
+                assert updated["imageUrl"].startswith("data:image/png;base64,")
+                result = '{"status":"performed"}'
+            send({"method": "item/completed", "params":
+                  dict(scope, item={"type": "agentMessage", "text": result})})
+            send({"method": "turn/completed", "params":
+                  dict(scope, turn={"id": "turn-1", "status": "completed"})})
+            """)
+    )
+    binary.chmod(0o700)
+    monkeypatch.setattr("lumon.tools.codex.resolve_codex_binary", lambda: str(binary))
+    monkeypatch.setenv("FIXTURE_SECRET", "fixture-only")
 
     commands: list[tuple[str, ...]] = []
     yarn = ("npx", "--yes", "--package=node@16", "--package=yarn@1.22.22", "--", "yarn")
@@ -352,61 +436,66 @@ def test_agent_discovers_web_build_from_pinned_source_without_a_profile(
     async def build_step(arguments: tuple[str, ...], *, cwd: Path, **options: object) -> bytes:
         del options
         assert cwd != remote and cwd != root / "repos/app"
-        commands.append(arguments)
-        if arguments == (*yarn, "run", "build:uat"):
+        assert arguments[0] == "offline-fixture"
+        commands.append(arguments[1:])
+        if arguments[1:] == (*yarn, "run", "build:uat"):
             (cwd / "dist").mkdir()
             (cwd / "dist/index.html").write_text("built from pinned source")
         return b""
 
     async def build_web(self: Runtime, target: WebTarget, checkout: Path, sha: str) -> str:
-        assert target.start_path == "/uat/"
+        assert target.environment == "uat" and target.start_path == "/uat/"
         assert (checkout / target.output / "index.html").is_file()
         return sha
 
-    async def operate(*args: object) -> None:
-        pass
+    def add_isolation(arguments: tuple[str, ...]) -> tuple[str, ...]:
+        return ("offline-fixture", *arguments)
 
+    monkeypatch.setattr("lumon.auto_test.runtime.offline_build", add_isolation)
     monkeypatch.setattr("lumon.auto_test.runtime.command", build_step)
     monkeypatch.setattr(Runtime, "_build_web", build_web)
     monkeypatch.setattr(Runtime, "record", _record)
-    monkeypatch.setattr(auto_test, "_operate", operate)
-    jira = FakeJira()
-    service = auto_test.AutoTestService(
-        registry,
-        jira=lambda site: jira,
-        openai=lambda: AsyncOpenAI(
-            api_key="fixture",
-            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(model_response)),
-        ),
+    AgentConfigStore(registry.layout.root).save(
+        AgentConfig(
+            agent_model="shared-agent-model",
+            agent_reasoning_effort="xhigh",
+            feishu_app_id="fixture-app",
+            feishu_app_secret="fixture-secret",
+        )
     )
+    jira = FakeJira()
+    service = auto_test.AutoTestService(registry, jira=lambda site: jira)
     saved = service.settings_store.load(workspace_id)
-    settings = _settings().model_copy(update={"web": None, "ios": None})
+    settings = AutoTestSettings(
+        enabled=True,
+        jira_site=_JIRA,
+        jira_project="QADEMO",
+        trigger_jql=_QA_JQL,
+        qa_environments={"uat": ("https://uat.example.test",)},
+    )
     service.settings_store.save(replace(saved, auto_test=settings))
     polled = asyncio.run(service.poll(workspace_id))
     assert polled.run_id is not None
     run = service.store(workspace_id).load(polled.run_id)
+    assert run.model_name == "shared-agent-model"
+    assert run.status == "completed", run.detail
     assert run.results[0].status == "passed"
     assert run.builds == {"web": head} and run.revisions[0].sha == head
     assert commands == [(*yarn, "install", "--frozen-lockfile"), (*yarn, "run", "build:uat")]
-    assert model_requests == 2
     assert not (root / "repos/app/dist").exists()
 
 
 def test_ios_build_uses_shared_qa_scheme_and_worker_simulator(
-    workspace: tuple[WorkspaceRegistry, UUID, Path, Path, str],
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, _, root, remote, _ = workspace
-    ios = remote / "ios"
+    ios = tmp_path / "ios"
     scheme = ios / "App.xcodeproj/xcshareddata/xcschemes/FixtureQA.xcscheme"
     scheme.parent.mkdir(parents=True)
     scheme.write_text("<Scheme/>")
     (ios / "Podfile").touch()
     (ios / "Podfile.lock").touch()
-    (remote / "config.uat.js").write_text("QA config")
-    _git(remote, "add", ".")
-    _git(remote, "commit", "-qm", "add shared QA scheme")
-    commands: list[tuple[str, ...]] = []
+    (tmp_path / "config.uat.js").write_text("QA config")
 
     async def simulators(*args: object, **options: object) -> bytes:
         del args, options
@@ -424,19 +513,7 @@ def test_ios_build_uses_shared_qa_scheme_and_worker_simulator(
             }
         ).encode()
 
-    async def build_step(arguments: tuple[str, ...], **options: object) -> bytes:
-        del options
-        commands.append(arguments)
-        return b""
-
-    async def build_ios(self: Runtime, target: IosTarget, checkout: Path, sha: str) -> str:
-        assert target.scheme == "FixtureQA" and (checkout / target.project).is_dir()
-        assert target.device_type.endswith("iPhone-18") and target.runtime.endswith("iOS-27-0")
-        return sha
-
     monkeypatch.setattr("lumon.auto_test.targets.command", simulators)
-    monkeypatch.setattr("lumon.auto_test.runtime.command", build_step)
-    monkeypatch.setattr(Runtime, "_build_ios", build_ios)
     choice = IosChoice(
         repository="app",
         project="ios/App.xcodeproj",
@@ -447,20 +524,28 @@ def test_ios_build_uses_shared_qa_scheme_and_worker_simulator(
         qa_config_file="config.uat.js",
     )
 
-    async def run() -> str:
-        sources = Sources(root, "test-ios-discovery")
-        try:
-            async with AsyncExitStack() as stack:
-                runtime = Runtime(AutoTestSettings(), sources, root / "builds", stack)
-                return await runtime.build("ios", choice=choice)
-        finally:
-            await sources.close()
-
-    assert asyncio.run(run()) == _git(remote, "rev-parse", "HEAD")
-    assert commands == [
+    target = asyncio.run(ios_target(choice, tmp_path.resolve()))
+    assert target.scheme == "FixtureQA" and (tmp_path / target.project).is_dir()
+    assert target.device_type.endswith("iPhone-18") and target.runtime.endswith("iOS-27-0")
+    assert target.build == (
         ("cp", "./config.uat.js", "./config.js"),
         ("pod", "install", "--deployment", "--project-directory=ios"),
-    ]
+    )
+
+
+def test_ios_cannot_build_or_launch_without_network_isolation(tmp_path: Path) -> None:
+    async def run() -> None:
+        sources = Sources(tmp_path, "ios-blocked")
+        async with AsyncExitStack() as stack:
+            runtime = Runtime(_settings(), sources, tmp_path / "build", stack)
+            with pytest.raises(PreflightError, match="network-isolated simulator"):
+                await runtime.build("ios")
+            with pytest.raises(PreflightError, match="network-isolated simulator"):
+                async with runtime.record("ios", tmp_path / "video.mp4"):
+                    pytest.fail("A simulator session started without network isolation")
+        assert not sources.revisions and not (tmp_path / "build").exists()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("script", ["deploy:uat", "build:publish", "sh -c arbitrary"])
@@ -468,6 +553,7 @@ def test_agent_cannot_select_non_build_commands(tmp_path: Path, script: str) -> 
     (tmp_path / "package.json").write_text(json.dumps({"scripts": {script: "unsafe-command"}}))
     choice = WebChoice(
         repository="app",
+        environment="uat",
         directory=".",
         script=script,
         output="dist",
@@ -478,12 +564,356 @@ def test_agent_cannot_select_non_build_commands(tmp_path: Path, script: str) -> 
         web_target(choice, tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        ("build", "does not confirm"),
+        ("build:staging", "does not confirm"),
+        ("build:uat-dev", "more than one"),
+        ("build:uat-production", "Production builds"),
+    ],
+)
+def test_agent_environment_must_match_the_pinned_build(
+    tmp_path: Path, script: str, message: str
+) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {script: "fixture"}}))
+    choice = WebChoice(
+        repository="app",
+        environment="uat",
+        directory=".",
+        script=script,
+        output="dist",
+        base_path="/",
+        start_path="/",
+    )
+    with pytest.raises(PreflightError, match=message):
+        web_target(choice, tmp_path.resolve())
+
+
+@pytest.mark.parametrize(
+    "environments",
+    [
+        {"production": ["https://service.example.test"]},
+        {"uat": ["https://prod.example.test"]},
+        {"staging": ["https://qa.example.test"], "uat": ["https://qa.example.test"]},
+        {"staging": ["https://qa.example.test"], "uat": ["https://qa.example.test:443"]},
+        {"development": ["http://dev.example.test"]},
+    ],
+)
+def test_environment_registrations_accept_only_distinct_nonproduction_https_origins(
+    environments: dict[str, list[str]],
+) -> None:
+    with pytest.raises(ValidationError):
+        AutoTestSettings.model_validate({"qa_environments": environments})
+
+
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        ("build:prod", "Production builds"),
+        ("build:uat", "conflicts with its configured test environment"),
+        ("build:staging", "No HTTPS origins are approved for the staging environment"),
+    ],
+)
+def test_configured_build_requires_confirmation_before_preparing_the_project(
+    workspace: tuple[WorkspaceRegistry, UUID, Path, Path, str], script: str, message: str
+) -> None:
+    _, _, root, _, _ = workspace
+    settings = AutoTestSettings(
+        web=WebTarget(
+            repository="app", build=(("npm", "run", script),), environment="staging", output="dist"
+        ),
+        qa_origins=("https://staging.example.test",),
+        qa_environments={"uat": ("https://uat.example.test",)},
+    )
+
+    async def run() -> None:
+        sources = Sources(root, "blocked-environment")
+        directory = root / "build"
+        try:
+            async with AsyncExitStack() as stack:
+                with pytest.raises(PreflightError, match=message):
+                    await Runtime(settings, sources, directory, stack).build("web")
+                assert not directory.exists()
+        finally:
+            await sources.close()
+
+    asyncio.run(run())
+
+
+def test_unapproved_backend_url_cannot_trigger_a_probe(tmp_path: Path) -> None:
+    settings = AutoTestSettings(
+        qa_environments={"uat": ("https://uat.example.test",)},
+        backends=(QABackend(repository="backend", version_url="https://uat.example.test/version"),),
+    )
+
+    async def run() -> None:
+        sources = Sources(tmp_path, "unapproved-backend")
+        async with AsyncExitStack() as stack:
+            runtime = Runtime(settings, sources, tmp_path, stack)
+            # A registration for another environment cannot authorize a URL on its own.
+            with pytest.raises(PreflightError, match="selected test environment"):
+                await runtime.verify_backends(("backend",))
+        assert not sources.revisions
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("host", "location", "fetched", "forwarded"),
+    [
+        ("staging.example.test", "", True, True),
+        ("staging.example.test", "/login", True, True),
+        ("uat.example.test", "", False, False),
+        ("staging.example.test", "https://uat.example.test/login", True, False),
+    ],
+)
+def test_web_request_mediation_checks_the_origin_and_every_redirect(
+    host: str, location: str, fetched: bool, forwarded: bool
+) -> None:
+    response = Mock(
+        spec=APIResponse,
+        status=302 if location else 200,
+        headers={"location": location} if location else {},
+        dispose=AsyncMock(),
+    )
+    route = Mock(
+        spec=Route,
+        request=Mock(url=f"https://{host}/app"),
+        fetch=AsyncMock(return_value=response),
+        fulfill=AsyncMock(),
+    )
+    scope = frozenset({"https://staging.example.test"})
+    assert asyncio.run(forward_web_request(cast(Route, route), scope)) is forwarded
+    if fetched:
+        route.fetch.assert_awaited_once_with(max_redirects=0, timeout=20000)
+        response.dispose.assert_awaited_once()
+    else:
+        route.fetch.assert_not_awaited()
+    if forwarded:
+        route.fulfill.assert_awaited_once_with(response=response)
+    else:
+        route.fulfill.assert_not_awaited()
+
+
 @asynccontextmanager
 async def _record(self: Runtime, platform: Platform, path: Path) -> AsyncGenerator[Recording]:
     try:
         yield Recording(FixtureScreen(), path, time.monotonic())
     finally:
         path.write_bytes(b"fixture recording" * 20)
+
+
+def test_clarifications_require_a_new_reply_and_current_jql_before_resuming(
+    workspace: tuple[WorkspaceRegistry, UUID, Path, Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, workspace_id, _, _, _ = workspace
+    jira = FakeJira()
+    service = _service(registry, workspace_id, jira)
+    question = ClarificationQuestion(criterion=_REQUIREMENT, question="Which draft can QA save?")
+    plan = _plan(_case("Save an approved draft"))
+    builds = _fixture_builds(monkeypatch, plan)
+    contexts: list[JiraIssue] = []
+
+    async def generate(
+        self: CasePlanner,
+        folder: Path,
+        settings: AutoTestSettings,
+        issue: JiraIssue,
+        sources: Sources,
+    ) -> PlannedTest:
+        contexts.append(issue)
+        if not issue.questions:
+            draft = plan.model_copy(update={"questions": (question,)})
+        else:
+            assert issue.questions == (question,)
+            response = ClarificationAnswer(number=1, quote="Use a new QA draft.")
+            draft = plan.model_copy(update={"answers": (response,)})
+        return PlannedTest(plan=validate_plan(draft, issue), web=None, ios=None)
+
+    async def operate(*args: object) -> None:
+        pass
+
+    monkeypatch.setattr(CasePlanner, "generate", generate)
+    monkeypatch.setattr(Runtime, "record", _record)
+    monkeypatch.setattr(auto_test, "_operate", operate)
+
+    async def run() -> None:
+        store = service.store(workspace_id)
+        initial = await service.poll(workspace_id)
+        assert initial.run_id is not None
+        blocked = store.load(initial.run_id)
+        assert blocked.status == "blocked" and blocked.jira.block_confirmed
+        assert blocked.results[0].status == "not_run"
+        assert not builds and not jira.uploads
+        assert jira.transitions == ["fixture-block"] and jira.comment_writes == ["create"]
+        assert question.question in next(iter(jira.posts.values()))
+        await service.retry_publication(workspace_id, initial.run_id)
+        assert jira.transitions == ["fixture-block"] and jira.comment_writes == ["create"]
+
+        jira.eligible = [_KEY]
+        jira.replies.append(
+            {"id": "80", "created": "2026-10-12T09:00:00Z", "body": "Use a new QA draft."}
+        )
+        assert (await service.poll(workspace_id)).status == "idle"
+        assert len(contexts) == 1
+
+        jira.replies.append(
+            {"id": "200", "created": "2026-10-12T10:30:00Z", "body": "Use a new QA draft."}
+        )
+        jira.eligible = []
+        assert (await service.poll(workspace_id, pilot_issue=_KEY)).status == "idle"
+        jira.eligible = [_KEY]
+        jira.status = "Ready for Test"
+        resumed = await service.poll(workspace_id)
+        assert resumed.run_id is not None and resumed.run_id != initial.run_id
+        result = store.load(resumed.run_id)
+        assert result.status == "completed" and result.results[0].status == "passed"
+        assert result.clarification_run_id == initial.run_id
+        assert contexts[-1].replies == ("Use a new QA draft.",)
+        assert len(builds) == 1 and jira.transitions == ["fixture-block"]
+
+    asyncio.run(run())
+
+
+def test_unconfirmed_reply_cannot_clear_a_question() -> None:
+    question = ClarificationQuestion(criterion=_REQUIREMENT, question="Which draft can QA save?")
+    answer = ClarificationAnswer(number=1, quote="Use a new QA draft.")
+    plan = _plan(_case("Save a draft")).model_copy(update={"answers": (answer,)})
+    issue = JiraIssue(_KEY, "Draft", _REQUIREMENT, questions=(question,), replies=("Checking.",))
+    plan = validate_plan(plan, issue)
+    assert plan.questions == (question,) and not plan.answers
+
+
+def test_jira_plan_reads_attached_acceptance_text_without_executing_it() -> None:
+    workbook = BytesIO()
+    with ZipFile(workbook, "w") as archive:
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row><c r="A1" t="inlineStr"><is><t>Approved subject</t></is>'
+            "</c></row></sheetData></worksheet>",
+        )
+    html = b"<p>Approved layout</p><script>ignore this script</script>"
+    files = {"1": ("acceptance.xlsx", workbook.getvalue()), "2": ("copy.html", html)}
+
+    class ReferenceJira(FakeJira):
+        async def _call(self, *arguments: str, timeout: float = 30) -> dict[str, object]:
+            match arguments:
+                case ("get", key, "--full"):
+                    attachments = [
+                        {"id": identifier, "filename": name, "size": len(data)}
+                        for identifier, (name, data) in files.items()
+                    ]
+                    attachments.append({"id": "3", "filename": "preview.png", "size": 36})
+                    return {"data": [{"key": key, "summary": "Mail", "attachment": attachments}]}
+                case (
+                    "attachment",
+                    "download",
+                    "--attachment-id",
+                    identifier,
+                    "--output-path",
+                    path,
+                ):
+                    Path(path).write_bytes(files[identifier][1])
+                    return {}
+                case _:
+                    return await super()._call(*arguments, timeout=timeout)
+
+    issue = asyncio.run(ReferenceJira().issue(_KEY))
+    assert issue.references == ("acceptance.xlsx\nApproved subject", "copy.html\nApproved layout")
+    assert issue.unread_attachments == ("preview.png",)
+    plan = CasePlan(
+        criteria=(AcceptanceCriterion(id="AC-1", quote="Approved subject", gap=None),),
+        cases=(),
+        gaps=(),
+    )
+    assert validate_plan(plan, issue).criteria == plan.criteria
+
+
+def test_question_during_execution_stops_remaining_cases_and_preserves_results(
+    workspace: tuple[WorkspaceRegistry, UUID, Path, Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, workspace_id, _, _, _ = workspace
+    jira = FakeJira()
+    service = _service(registry, workspace_id, jira)
+    _fixture_builds(monkeypatch, _plan(_case("First"), _case("Second"), _case("Third")))
+    replies = iter(
+        (
+            '{"status":"performed"}',
+            '{"status":"needs_answer","question":"What outcome should a duplicate draft show?"}',
+        )
+    )
+
+    async def respond(self: CodexTestRunner, *args: object, **kwargs: object) -> str:
+        return next(replies)
+
+    monkeypatch.setattr(CodexTestRunner, "turn", respond)
+    monkeypatch.setattr(Runtime, "record", _record)
+
+    async def run() -> None:
+        outcome = await service.poll(workspace_id)
+        assert outcome.run_id is not None
+        result = service.store(workspace_id).load(outcome.run_id)
+        assert result.status == "blocked" and result.jira.block_confirmed
+        assert [item.status for item in result.results] == ["passed", "blocked", "not_run"]
+        assert result.results[0].artifacts and result.results[1].artifacts
+        assert "duplicate draft" in next(iter(jira.posts.values()))
+
+    asyncio.run(run())
+
+
+def test_block_transition_requires_fields_to_be_supplied_outside_auto_test(
+    workspace: tuple[WorkspaceRegistry, UUID, Path, Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, workspace_id, _, _, _ = workspace
+    jira = FakeJira()
+    jira.requirements = ["Resolution"]
+    service = _service(registry, workspace_id, jira)
+    question = ClarificationQuestion(criterion=_REQUIREMENT, question="Which draft can QA save?")
+    _fixture_builds(monkeypatch, _plan().model_copy(update={"questions": (question,)}))
+
+    async def run() -> None:
+        outcome = await service.poll(workspace_id)
+        assert outcome.run_id is not None
+        blocked = service.store(workspace_id).load(outcome.run_id)
+        assert blocked.status == "blocked"
+        assert blocked.jira.status == "partial" and "additional inputs" in blocked.jira.detail
+        assert not jira.transitions and jira.comment_writes == ["create"]
+        jira.requirements = []
+        retried = await service.retry_publication(workspace_id, outcome.run_id)
+        assert retried.jira.block_confirmed and jira.transitions == ["fixture-block"]
+        assert jira.comment_writes == ["create"]
+
+    asyncio.run(run())
+
+
+def test_pilot_targets_one_issue_and_keeps_ordinary_results_local(
+    workspace: tuple[WorkspaceRegistry, UUID, Path, Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, workspace_id, _, _, _ = workspace
+    jira = FakeJira()
+    jira.eligible = []
+    service = _service(registry, workspace_id, jira)
+    _fixture_builds(monkeypatch, _plan())
+
+    async def run() -> None:
+        assert (await service.poll(workspace_id, pilot_issue="OTHER-7")).status == "failed"
+        outcome = await service.poll(workspace_id, pilot_issue=_KEY)
+        assert outcome.run_id is not None
+        result = service.store(workspace_id).load(outcome.run_id)
+        assert result.pilot and result.issue_key == _KEY
+        assert not jira.queries and not jira.posts
+        jira.eligible = [_KEY]
+        following = await service.poll(workspace_id)
+        assert following.run_id is not None and following.run_id != outcome.run_id
+        assert jira.posts
+
+    asyncio.run(run())
 
 
 def test_poll_pins_latest_branch_and_tests_once_until_an_eligible_retest(
@@ -572,10 +1002,8 @@ def test_poll_pins_latest_branch_and_tests_once_until_an_eligible_retest(
         retry = await service.poll(workspace_id, manual=True, retest=result.run_id)
         assert retry.status == "ran" and retry.run_id != result.run_id
         assert len(jira.posts) == 2
-        assert all(
-            'status = "Ready For QA"' in q and "Flagged = Impediment" in q for q in jira.queries
-        )
-        assert jira.queries[-1].endswith("AND key = QA-7 ORDER BY Rank ASC")
+        assert all('status = "Ready for Test"' in query for query in jira.queries)
+        assert jira.queries[-1].endswith(f"AND key = {_KEY} ORDER BY Rank ASC")
 
     asyncio.run(run())
 
@@ -665,14 +1093,15 @@ def test_stop_finalizes_the_current_recording_and_cleans_owned_processes(
 
 def test_queue_excludes_only_previously_claimed_candidates_in_the_active_query() -> None:
     jira = FakeJira()
-    claimed = frozenset(f"QA-{index}" for index in range(10_000, 11_000))
+    claimed = frozenset(f"QADEMO-{index}" for index in range(10_000, 11_000))
     jira.eligible = [*sorted(claimed)[:50], _KEY]
     assert asyncio.run(jira.candidate(_settings(), claimed)) == _KEY
     assert len(jira.queries) == 2
     assert "key NOT IN" not in jira.queries[0]
     assert sorted(claimed)[0] in jira.queries[1]
     assert sorted(claimed)[-1] not in jira.queries[1]
-    assert all("openSprints()" in query and "ORDER BY Rank ASC" in query for query in jira.queries)
+    assert all('status = "Ready for Test"' in query for query in jira.queries)
+    assert all(query.endswith("ORDER BY Rank ASC") for query in jira.queries)
 
 
 def test_case_plan_requires_jira_criteria_and_a_nonempty_text_check() -> None:
@@ -709,12 +1138,12 @@ def test_ios_assertion_and_pixel_mapping_use_the_appium_session() -> None:
         ) as client:
             screen = IosScreen(client, "fixture", "com.example.fixture")
             await screen.screenshot()
-            await screen.perform(Click(type="click", button="left", x=450, y=1200))
+            await screen.perform(PointerAction(type="click", x=450, y=1200))
             check = _case("Save draft", "ios", selector="draft-status").checks[0]
             assert await screen.observe(check) == (True, True, "Saved")
             response_values["/execute/sync"] = {"bundleId": "other.app"}
             with pytest.raises(PreflightError, match="foreground"):
-                await screen.perform(Click(type="click", button="left", x=450, y=1200))
+                await screen.perform(PointerAction(type="click", x=450, y=1200))
 
     asyncio.run(run())
     actions = [payload for path, payload in command_log if path == "/actions"]
@@ -735,15 +1164,21 @@ def test_dashboard_settings_are_workspace_scoped_and_poll_is_off(
     assert initial.json()["schedule_expression"] == "*/5 * * * *"
     body = _settings(enabled=False).model_dump(mode="json")
     body["qa_origins"] = ["https://qa.example.test"]
+    body["qa_environments"] = {"uat": ["https://uat.example.test"]}
     external = client.put(
         prefix + "/settings", headers={"Origin": "https://example.net"}, json=body
     )
     assert external.status_code == 403
     updated = client.put(prefix + "/settings", json=body)
     assert updated.status_code == 200 and updated.json()["trigger_jql"] == _QA_JQL
-    for internal in ("web", "ios", "qa_origins", "backends"):
+    for internal in ("web", "ios", "qa_origins", "qa_environments", "backends", "model"):
         assert internal not in updated.json()
-    assert client.put(prefix + "/settings", json={"model": "example-model"}).status_code == 200
+    profile = dashboard.settings_store.path_for(workspace_id)
+    profile.write_text(
+        profile.read_text().replace("[auto_test]\n", '[auto_test]\nmodel = "old-model"\n')
+    )
+    assert client.get(prefix + "/settings").json() == updated.json()
+    assert client.put(prefix + "/settings", json={"model": "example-model"}).status_code == 422
     jira = {
         "jira_site": "qa-example.atlassian.net",
         "jira_project": "QA",
@@ -751,11 +1186,13 @@ def test_dashboard_settings_are_workspace_scoped_and_poll_is_off(
     }
     jira_saved = client.put(prefix + "/settings", json=jira)
     assert jira_saved.status_code == 200
-    assert jira_saved.json() == {**updated.json(), "model": "example-model", **jira}
+    assert jira_saved.json() == {**updated.json(), **jira}
     stored = auto_test.AutoTestService(registry).settings_store.load(workspace_id).auto_test
-    assert stored.trigger_jql == "project = QA" and stored.model == "example-model"
+    assert stored.trigger_jql == "project = QA"
+    assert "old-model" not in profile.read_text()
     assert stored.web == _settings().web and stored.ios == _settings().ios
     assert stored.qa_origins == ("https://qa.example.test",)
+    assert stored.qa_environments == {"uat": ("https://uat.example.test",)}
     assert client.get(f"/api/workspaces/{uuid4()}/auto-test/settings").status_code == 404
     assert client.get(prefix + "/runs").json() == {"runs": [], "poll": None, "starting": False}
     assert asyncio.run(auto_test.AutoTestService(registry).poll(workspace_id)).status == "disabled"

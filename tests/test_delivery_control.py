@@ -321,6 +321,7 @@ def test_resume_success_and_duplicate_effect_instructions(
             on_event: AgentEventCallback | None = None,
         ) -> AgentResult:
             assert "Reconcile remote commits" in prompt
+            assert "chromium.launch(headless=True)" in prompt
             assert on_event is not None
             await on_event(AgentEvent(kind="session", agent_session_id=session))
             current = service.run_store.load(root, run.run_id)

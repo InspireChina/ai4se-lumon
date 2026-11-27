@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -16,15 +17,24 @@ from lumon.tools.codex import is_missing_session_error
 class CodexRpcError(Exception):
     """Provider error; deliberately excludes arbitrary server text and credentials."""
 
-    def __init__(self, code: int | None = None, *, session_unavailable: bool = False) -> None:
+    def __init__(
+        self,
+        code: int | None = None,
+        *,
+        thread_busy: bool = False,
+        session_unavailable: bool = False,
+    ) -> None:
         super().__init__("Codex app-server request failed.")
         self.code = code
+        self.thread_busy = thread_busy
         self.session_unavailable = session_unavailable
+        self.method: str | None = None
 
 
 class CodexRpc:
-    def __init__(self) -> None:
+    def __init__(self, *, allow_tool_calls: bool = False) -> None:
         self.notifications: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=512)
+        self._allow_tool_calls = allow_tool_calls
         self.process: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._stderr: asyncio.Task[None] | None = None
@@ -77,6 +87,9 @@ class CodexRpc:
         try:
             await self.send({"id": request_id, "method": method, "params": params})
             return await asyncio.wait_for(future, timeout)
+        except CodexRpcError as exc:
+            exc.method = method
+            raise
         finally:
             self._pending.pop(request_id, None)
 
@@ -104,7 +117,8 @@ class CodexRpc:
             self.notifications.put_nowait({"method": "lumon/closed"})
 
     async def _receive_method(self, message: dict[str, object]) -> None:
-        if "id" in message:
+        tool_call = self._allow_tool_calls and message.get("method") == "item/tool/call"
+        if "id" in message and not tool_call:
             # Full-access operation needs no approvals. Never auto-approve new RPC types.
             await self.send(
                 {
@@ -134,16 +148,24 @@ class CodexRpc:
             error = message.get("error")
             fields = cast(dict[str, object], error) if isinstance(error, dict) else {}
             code, detail = fields.get("code"), fields.get("message")
-            session_unavailable = (
-                resume_thread is not None
-                and code == -32600
+            thread_busy = (
+                code == -32600
                 and isinstance(detail, str)
-                and is_missing_session_error(detail, resume_thread)
+                and re.fullmatch(
+                    r"thread [A-Za-z0-9_-]{1,128} already has an active writer", detail
+                )
+                is not None
             )
             future.set_exception(
                 CodexRpcError(
                     code if isinstance(code, int) else None,
-                    session_unavailable=session_unavailable,
+                    thread_busy=thread_busy,
+                    session_unavailable=(
+                        resume_thread is not None
+                        and code == -32600
+                        and isinstance(detail, str)
+                        and is_missing_session_error(detail, resume_thread)
+                    ),
                 )
             )
         else:

@@ -3,19 +3,13 @@ import { useEffect, useState } from "react";
 import { useI18n } from "../../shared/i18n";
 import type { AutoTestSettings } from "../../shared/types";
 
-const labels = {
-  en: {
-    schedule: "Schedule tests", cron: "Schedule (cron)", model: "OpenAI model",
-  },
-  "zh-TW": {
-    schedule: "啟用定時測試", cron: "排程（cron）", model: "OpenAI 模型",
-  },
-  "zh-CN": {
-    schedule: "启用定时测试", cron: "计划（cron）", model: "OpenAI 模型",
-  },
+const scheduleLabels = {
+  en: "Schedule (cron)",
+  "zh-TW": "排程（cron）",
+  "zh-CN": "计划（cron）",
 };
 
-type TestControls = Pick<AutoTestSettings, "enabled" | "schedule_expression" | "model" | "trigger_jql">;
+type TestControls = Pick<AutoTestSettings, "enabled" | "schedule_expression" | "trigger_jql">;
 
 export function AutoTestSettingsPanel({ settings, onDirtyChange, onSave }: {
   settings?: AutoTestSettings;
@@ -23,16 +17,15 @@ export function AutoTestSettingsPanel({ settings, onDirtyChange, onSave }: {
   onSave: (settings: TestControls) => Promise<boolean>;
 }): React.JSX.Element {
   const { locale, t } = useI18n();
-  const copy = labels[locale];
-  const { enabled = false, schedule_expression = "", model = "", trigger_jql = "" } = settings ?? {};
-  const [draft, setDraft] = useState<TestControls>({ enabled, schedule_expression, model, trigger_jql });
+  const { enabled = false, schedule_expression = "", trigger_jql = "" } = settings ?? {};
+  const [draft, setDraft] = useState<TestControls>({ enabled, schedule_expression, trigger_jql });
   const [saving, setSaving] = useState(false);
   const dirty = draft.enabled !== enabled || draft.schedule_expression !== schedule_expression
-    || draft.model !== model || draft.trigger_jql !== trigger_jql;
+    || draft.trigger_jql !== trigger_jql;
 
   useEffect(() => {
-    setDraft({ enabled, schedule_expression, model, trigger_jql });
-  }, [enabled, schedule_expression, model, trigger_jql]);
+    setDraft({ enabled, schedule_expression, trigger_jql });
+  }, [enabled, schedule_expression, trigger_jql]);
 
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
 
@@ -62,7 +55,7 @@ export function AutoTestSettingsPanel({ settings, onDirtyChange, onSave }: {
           <div className="settings-heading-actions">
             {dirty && <span className="unsaved-label">{t("settings.unsaved")}</span>}
             <label className={`settings-toggle ${draft.enabled ? "is-enabled" : ""}`}>
-              <span>{copy.schedule}</span>
+              <span>{draft.enabled ? t("settings.enabled") : t("settings.disabled")}</span>
               <input type="checkbox" role="switch" checked={draft.enabled} disabled={saving}
                 onChange={(event) => edit("enabled", event.target.checked)} />
               <span className="settings-switch" aria-hidden="true"><span className="settings-switch-thumb" /></span>
@@ -73,12 +66,11 @@ export function AutoTestSettingsPanel({ settings, onDirtyChange, onSave }: {
       {settings ? (
         <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <fieldset className="auto-test-settings-fields form-grid" disabled={saving}>
-            {([["schedule_expression", copy.cron], ["model", copy.model]] as const).map(([key, label]) => (
-              <label key={key}>
-                <span className="field-label">{label}</span>
-                <input name={key} className="text-input" value={draft[key]} onChange={(event) => edit(key, event.target.value)} />
-              </label>
-            ))}
+            <label>
+              <span className="field-label">{scheduleLabels[locale]}</span>
+              <input name="schedule_expression" className="text-input mono" value={draft.schedule_expression}
+                onChange={(event) => edit("schedule_expression", event.target.value)} />
+            </label>
             <label className="field-full">
               <span className="field-label">{t("settings.jiraQuery")}</span>
               <textarea id="auto-test-jql" className="text-input text-area mono" rows={5} maxLength={8000}
