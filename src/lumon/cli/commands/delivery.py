@@ -273,13 +273,19 @@ def checkpoint(
     run_id: Annotated[str, typer.Option("--run-id")],
     detail: Annotated[str, typer.Option("--detail")],
     result_comment_id: Annotated[str | None, typer.Option("--result-comment-id")] = None,
+    blocker_comment_id: Annotated[str | None, typer.Option("--blocker-comment-id")] = None,
     workspace: Annotated[Path, typer.Option("--workspace")] = Path("."),
 ) -> None:
-    """Save a safe handoff and source fingerprint, optionally the one Jira result comment ID."""
+    """Save a handoff, source fingerprint and any verified Jira comment IDs."""
     try:
         root, _ = _workspace_identity(workspace)
         save_checkpoint(
-            DeliveryService().run_store, root, run_id, detail=detail, comment_id=result_comment_id
+            DeliveryService().run_store,
+            root,
+            run_id,
+            detail=detail,
+            comment_id=result_comment_id,
+            blocker_comment_id=blocker_comment_id,
         )
         typer.echo("Delivery checkpoint saved.")
     except (LumonError, ValueError) as exc:

@@ -23,6 +23,7 @@ class JiraDeliveryCandidate:
     title: str
     url: str
     reentry_id: str | None = None
+    blocker_reply_ids: tuple[str, ...] = ()
 
 
 class _Issue(BaseModel):
@@ -83,6 +84,19 @@ class _PageInfo(BaseModel):
 
 class _HistoryResponse(BaseModel):
     data: list[_History]
+    pageInfo: _PageInfo
+    errors: list[object] = Field(default_factory=list[object], max_length=0)
+
+
+class _Comment(BaseModel):
+    id: str = Field(pattern=r"^[0-9]+$")
+    created: datetime
+    author: _Author | None = None
+    parent_id: str | None = Field(default=None, alias="parentId")
+
+
+class _CommentResponse(BaseModel):
+    data: list[_Comment]
     pageInfo: _PageInfo
     errors: list[object] = Field(default_factory=list[object], max_length=0)
 
@@ -187,6 +201,8 @@ class JiraDeliveryTrigger:
         *,
         finished_at: datetime,
         consumed_event_id: str | None = None,
+        require_blocker_reply: bool = False,
+        blocker_comment_id: str | None = None,
     ) -> JiraDeliveryCandidate | None:
         """Require a complete, newer status transition AND a current match to all entry gates."""
 
@@ -230,9 +246,16 @@ class JiraDeliveryTrigger:
                     for item in latest.items
                 ):
                     return None
+                replies: tuple[str, ...] = ()
+                if require_blocker_reply:
+                    replies = await self._blocker_replies(
+                        site, key, blocker_comment_id, finished_at
+                    )
+                    if not replies:
+                        return None
                 issue = match.issues[0]
                 return JiraDeliveryCandidate(
-                    key, issue.summary, f"https://{site}/browse/{key}", latest.id
+                    key, issue.summary, f"https://{site}/browse/{key}", latest.id, replies
                 )
         except (OSError, TimeoutError, ValueError) as exc:
             raise PreflightError(
@@ -263,6 +286,44 @@ class JiraDeliveryTrigger:
                 raise ValueError("Incomplete Jira status history.")
             cursor = next_cursor
         raise ValueError("Jira status history exceeds the detection limit.")
+
+    async def _blocker_replies(
+        self, site: str, key: str, blocker_comment_id: str | None, finished_at: datetime
+    ) -> tuple[str, ...]:
+        comments = await self._comments(site, key)
+        since = next(
+            (comment.created for comment in comments if comment.id == blocker_comment_id),
+            finished_at,
+        )
+        return tuple(
+            comment.id
+            for comment in sorted(comments, key=lambda item: item.created)
+            if comment.created > since
+            and comment.author is not None
+            and comment.author.accountType == "atlassian"
+            and comment.parent_id in {None, blocker_comment_id}
+        )
+
+    async def _comments(self, site: str, key: str) -> list[_Comment]:
+        cursor: str | None = None
+        comments: list[_Comment] = []
+        for _ in range(20):
+            arguments = ("--after", cursor) if cursor else ()
+            page = _CommentResponse.model_validate_json(
+                await self._read(
+                    "comment", "query", "--issue-id", key, "--first", "100", *arguments, site=site
+                )
+            )
+            if any(comment.created.utcoffset() is None for comment in page.data):
+                raise ValueError("Jira comment timestamp has no timezone.")
+            comments.extend(page.data)
+            if not page.pageInfo.hasNextPage:
+                return comments
+            next_cursor = page.pageInfo.nextCursor
+            if not next_cursor or next_cursor == cursor:
+                raise ValueError("Incomplete Jira comments.")
+            cursor = next_cursor
+        raise ValueError("Jira comments exceed the detection limit.")
 
     async def _read(self, *arguments: str, site: str) -> bytes:
         code, payload = await read_twg_jira(

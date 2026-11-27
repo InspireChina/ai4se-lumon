@@ -119,13 +119,30 @@ Local mode ends in handoff; published modes end in publish. Missing authenticati
 tools or publication verification must produce fail/block, never claimed success.
 Lifecycle commands send the normal Feishu notifications; do not send extras.
 
+## Jira blocker handoff
+
+These rules override older Workspace directions for Blocked comments. Before calling
+`lumon delivery block`, leave one blocker comment on the selected Jira Story for the
+current attempt. Describe the phase, the blocker, the work already verified and the
+specific action or decision you need. Ask the operator to reply on the Story and move
+it back to the configured entry status after addressing the blocker. Omit credentials,
+private paths and raw logs.
+
+Use `Lumon Delivery Blocker: <story-run-id> (attempt <n>)` as the exact marker for this
+attempt. Use TWG on the configured Jira site. Query comments and follow pagination
+before writing. Reuse the verified blocker comment with that marker if it already
+exists. Otherwise create it with `twg jira workitem comment create --issue-id
+<Story-key> --site $jira_site --body-format markdown --body <body>`. After a timeout,
+query and reconcile the marker before any retry. Once read-back confirms the comment,
+save its numeric ID with `lumon delivery checkpoint --run-id <story-run-id> --detail
+<handoff> --blocker-comment-id <id>`. Never use the final result comment for a blocker.
+If the comment cannot be verified, record the failure locally and still record the
+Blocked outcome. Do not move the Story back to its entry status yourself.
+
 ## Durable checkpoint and ONE final Jira result comment
 
-These rules override older Workspace text asking for a comment on every run or on
-Blocked/Failed outcomes. A logical Delivery may have several attempts; they are NOT
-separate deliveries. Never comment on start, progress, rework, blocked, failed or
-stopped outcomes. Save those details locally using progress/checkpoint and the
-terminal receipt. Jira status transitions must not add an automatic comment.
+Keep start, progress, rework, failed and stopped details in the local receipt. Jira
+status transitions must not add a comment.
 
 After each useful milestone and before blocking/failing, save a concise, safe handoff
 with `lumon delivery checkpoint --run-id <story-run-id> --detail <handoff>`: completed
@@ -138,8 +155,8 @@ logical Delivery. Use the authenticated local TWG CLI on the selected card and s
 First read the receipt's result_comment_id and query the existing comments with
 `twg jira workitem comment query --issue-id <Story-key> --site $jira_site`.
 Check all relevant pages before deciding no result comment exists. Reuse the verified
-result comment for this run (including an older blocked-result comment). Never
-replace a human discussion or Technical Plan.
+result comment for this run. Preserve blocker comments, human replies and the
+Technical Plan.
 Use the stable marker `Lumon Delivery: delivery-<Story-key>` to reconcile ambiguous
 network outcomes. If a write times out, read/reconcile before any retry; do NOT
 blindly create another comment. If identity is ambiguous, block reporting locally.

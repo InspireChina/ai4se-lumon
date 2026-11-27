@@ -312,3 +312,89 @@ def test_partial_jira_reentry_history_fails_closed(tmp_path: Path) -> None:
                 finished_at=datetime(2026, 10, 23, tzinfo=UTC),
             )
         )
+
+
+@pytest.mark.parametrize("reply", ["missing", "threaded", "flat", "legacy", "incomplete"])
+def test_blocked_reentry_uses_fresh_human_comments(
+    monkeypatch: pytest.MonkeyPatch, reply: str
+) -> None:
+    blocker_id = None if reply == "legacy" else "20"
+    author = {"accountType": "atlassian"}
+
+    async def read(self: JiraDeliveryTrigger, *arguments: str, site: str) -> bytes:
+        assert site == "test.atlassian.net"
+        if arguments[0] == "query":
+            data: object = {"issues": [_issue()]}
+        elif arguments[0] == "get":
+            data = [{"key": "TEST-1", "status": {"id": "10036"}}]
+        elif arguments[0] == "changelog":
+            data = [
+                {
+                    "id": "7",
+                    "created": "2026-11-27T06:15:00Z",
+                    "author": author,
+                    "items": [{"field": "status", "from": "10269", "to": "10036"}],
+                }
+            ]
+        else:
+            assert arguments[:4] == ("comment", "query", "--issue-id", "TEST-1")
+            if reply == "incomplete":
+                return b'{"data": [], "pageInfo": {"hasNextPage": true}}'
+            if "--after" not in arguments:
+                rows: list[dict[str, object]] = [
+                    {"id": "18", "created": "2026-11-27T05:00:00Z", "author": author},
+                    {
+                        "id": "21",
+                        "created": "2026-11-27T06:02:00Z",
+                        "author": {"accountType": "app"},
+                    },
+                    {
+                        "id": "22",
+                        "created": "2026-11-27T06:03:00Z",
+                        "author": author,
+                        "parentId": "18",
+                    },
+                ]
+                if blocker_id is not None:
+                    rows.append(
+                        {"id": blocker_id, "created": "2026-11-27T05:58:00Z", "author": author}
+                    )
+                return json.dumps(
+                    {"data": rows, "pageInfo": {"hasNextPage": True, "nextCursor": "next"}}
+                ).encode()
+            assert arguments[-2:] == ("--after", "next")
+            data = (
+                [
+                    {
+                        "id": "23",
+                        "created": "2026-11-27T05:59:00Z"
+                        if reply == "threaded"
+                        else "2026-11-27T06:10:00Z",
+                        "author": author,
+                        "parentId": blocker_id if reply == "threaded" else None,
+                    }
+                ]
+                if reply != "missing"
+                else []
+            )
+        return json.dumps({"data": data, "pageInfo": {"hasNextPage": False}}).encode()
+
+    monkeypatch.setattr(JiraDeliveryTrigger, "_read", read)
+    result = JiraDeliveryTrigger().reentered(
+        "test.atlassian.net",
+        "project = TEST AND status = 10036",
+        "TEST-1",
+        finished_at=datetime(2026, 11, 27, 6, tzinfo=UTC),
+        require_blocker_reply=True,
+        blocker_comment_id=blocker_id,
+    )
+    if reply == "incomplete":
+        with pytest.raises(PreflightError, match="not resumed"):
+            asyncio.run(result)
+    else:
+        candidate = asyncio.run(result)
+        if reply == "missing":
+            assert candidate is None
+        else:
+            assert candidate is not None
+            assert candidate.blocker_reply_ids == ("23",)

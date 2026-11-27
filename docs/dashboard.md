@@ -406,7 +406,11 @@ lumon delivery stop --workspace /path/to/workspace --run-id delivery-KEY-123 --a
 Jira re-entry is checked during the existing schedule, without a Codex turn.
 It requires Failed/Blocked/Stopped, a complete status changelog with a newer
 non-app-account status transition after that attempt finished, and a current
-match to the full saved JQL (including any Flag/sprint gates). The JQL must contain
+match to the full saved JQL (including any Flag/sprint gates). For a Blocked
+delivery, the poll also requires a new human comment after that attempt's blocker
+comment. If an older attempt has no saved comment ID, the attempt's finish time
+sets the cutoff. The Agent receives the candidate reply IDs and reads the full
+comment context to check whether the reply addresses the blocker. The JQL must contain
 an explicit `status = ...` or `status in (...)` entry gate; status-less queries
 remain manual-resume-only. Merely editing a card, keeping it in Ready for Dev,
 or reusing an old transition does not resume it. Completed deliveries are never
@@ -418,8 +422,15 @@ the execution prompt therefore forbids the Agent from moving a card back to entr
 conditions to authorize its own retry. Fully daemonized/reparented or remote jobs
 need explicit capability cleanup; Stop does not undo external effects.
 
-The Agent writes one final Jira result comment per successful Delivery. Blocked,
-failed, stopped and rework outcomes stay in the local receipt. The Agent uses TWG
+For a Blocked attempt, the Agent uses TWG to leave one Jira blocker comment with
+the reason and the next action. An operator can reply on the Story and move it
+back to the configured entry status, such as **Ready for Dev**. The next eligible
+poll continues the same worktree and Delivery receipt. The Agent reconciles the
+attempt's marker before retrying a comment write and saves the verified comment ID.
+Failures to publish the comment stay in the local Blocked receipt.
+
+The Agent writes one separate final Jira result comment per successful Delivery.
+Failed, stopped and rework outcomes stay in the local receipt. The Agent uses TWG
 to query and create the comment, or update the verified result for the same run.
 It checks the stable marker and saved comment ID before each write. If native media
 requires the Jira editor, the Agent edits the same comment there. It confirms the

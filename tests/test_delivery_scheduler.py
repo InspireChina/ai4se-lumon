@@ -45,6 +45,8 @@ def _candidate(monkeypatch: pytest.MonkeyPatch) -> None:
         *,
         finished_at: datetime,
         consumed_event_id: str | None = None,
+        require_blocker_reply: bool = False,
+        blocker_comment_id: str | None = None,
     ) -> None:
         return None
 

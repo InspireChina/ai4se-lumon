@@ -120,6 +120,7 @@ class DeliveryRun:
     worktree_snapshot: str | None = None
     result_comment_id: str | None = None
     jira_reentry_id: str | None = None
+    blocker_comment_id: str | None = None
 
     def __post_init__(self) -> None:
         self._sanitize()
@@ -129,6 +130,11 @@ class DeliveryRun:
             UUID(self.agent_session_id)
         if self.result_comment_id is not None and not self.result_comment_id.isdecimal():
             raise ValueError("Jira result comment ID must be numeric.")
+        if self.blocker_comment_id is not None:
+            if not self.blocker_comment_id.isdecimal():
+                raise ValueError("Jira blocker comment ID must be numeric.")
+            if self.blocker_comment_id == self.result_comment_id:
+                raise ValueError("Jira blocker and result comments must be separate.")
 
     def _sanitize(self) -> None:
         """Keep external text safe before it reaches Cards or receipts."""

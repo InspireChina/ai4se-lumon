@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from lumon.agents.agent.config import AgentConfig, AgentConfigStore
 from lumon.agents.agent.model import AgentErrorCode, AgentEvent, AgentResult
 from lumon.agents.agent.runner import AgentEventCallback, AgentRunner, ProgressCallback
+from lumon.cli.app import main
 from lumon.dashboard.routes import create_app
 from lumon.dashboard.service import DashboardService
 from lumon.delivery.control import prepare_resume, request_stop, save_checkpoint, worktree_snapshot
@@ -102,6 +103,7 @@ def test_resume_preserves_attempt_checkpoint_and_rejects_stale_actions(
         run.run_id,
         detail="Tests passed; no push.",
         comment_id="50509",
+        blocker_comment_id="50601",
     )
     service.run_store.archive_attempt(workspace, run)
     service.run_store.archive_attempt(workspace, run)
@@ -124,6 +126,7 @@ def test_resume_preserves_attempt_checkpoint_and_rejects_stale_actions(
     assert resumed.attempt == 2 and resumed.run_id == run.run_id
     assert resumed.jira_reentry_id == "337133"
     assert resumed.checkpoint == run.checkpoint and resumed.result_comment_id == "50509"
+    assert resumed.blocker_comment_id is None
     assert resumed.started_at == run.started_at and resumed.attempt_started_at == poll.started_at
     newer = replace(run, run_id="newer", started_at=run.started_at + timedelta(seconds=1))
     service.run_store.save(workspace, newer)
@@ -131,6 +134,7 @@ def test_resume_preserves_attempt_checkpoint_and_rejects_stale_actions(
     assert service.run_store.load(workspace, run.run_id) == resumed
     archive = service.run_store.path_for(workspace, run.run_id) / "attempt-1.json"
     assert json.loads(archive.read_text())["state"] == "blocked"
+    assert json.loads(archive.read_text())["blocker_comment_id"] == "50601"
     with pytest.raises(PreflightError, match="attempt changed"):
         request_stop(service.run_store, workspace, workspace_id, run.run_id, attempt=1)
     with pytest.raises(PreflightError, match="different archived"):
@@ -197,6 +201,39 @@ def test_result_comment_id_cannot_be_replaced_by_another_comment(
     assert service.run_store.load(workspace, run.run_id).result_comment_id == "50509"
 
 
+def test_blocker_comment_checkpoint_is_separate_and_stable_for_the_attempt(
+    lab: tuple[Path, Path, UUID, DeliveryService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, workspace, workspace_id, service = lab
+    monkeypatch.setenv("LUMON_HOME", str(state))
+    run = blocked(workspace, workspace_id, service)
+    store = service.run_store
+    assert (
+        main(
+            [
+                "delivery",
+                "checkpoint",
+                "--workspace",
+                str(workspace),
+                "--run-id",
+                run.run_id,
+                "--detail",
+                "Need access",
+                "--blocker-comment-id",
+                "50601",
+            ]
+        )
+        == 0
+    )
+    saved = store.load(workspace, run.run_id)
+    assert saved.blocker_comment_id == "50601" and saved.result_comment_id is None
+    with pytest.raises(PreflightError, match="Reuse the existing blocker comment"):
+        save_checkpoint(store, workspace, run.run_id, blocker_comment_id="50602")
+    with pytest.raises(ValueError, match="blocker and result comments must be separate"):
+        save_checkpoint(store, workspace, run.run_id, comment_id="50601")
+
+
 def test_dashboard_task_resumes_session_and_acknowledges_stop_only_after_cancellation(
     lab: tuple[Path, Path, UUID, DeliveryService],
 ) -> None:
@@ -218,6 +255,8 @@ def test_dashboard_task_resumes_session_and_acknowledges_stop_only_after_cancell
             assert agent_session_id == run.agent_session_id
             assert "do NOT call start" in prompt and "ONE final Jira result comment" in prompt
             assert "Leave automatic deployments to the repository." in prompt
+            assert "Lumon Delivery Blocker: <story-run-id> (attempt <n>)" in prompt
+            assert "--blocker-comment-id <id>" in prompt
             assert "do NOT blindly create" in prompt or "blindly create" in prompt
             assert "twg jira workitem comment query" in prompt
             assert "twg jira workitem comment create" in prompt
@@ -413,8 +452,11 @@ def test_poll_does_not_resume_without_post_terminal_jira_reentry(
         *,
         finished_at: datetime,
         consumed_event_id: str | None = None,
+        require_blocker_reply: bool = False,
+        blocker_comment_id: str | None = None,
     ) -> None:
         assert key == run.story_key and finished_at == run.finished_at
+        assert require_blocker_reply and blocker_comment_id is None
         return None
 
     monkeypatch.setattr(JiraDeliveryTrigger, "find_candidate", no_candidate)
@@ -500,6 +542,7 @@ def test_jira_reentry_resumes_once_and_completed_receipt_stays_excluded(
 ) -> None:
     state, workspace, workspace_id, service = lab
     run = blocked(workspace, workspace_id, service)
+    save_checkpoint(service.run_store, workspace, run.run_id, blocker_comment_id="50601")
     matches: list[str] = []
 
     async def no_fresh(
@@ -520,10 +563,13 @@ def test_jira_reentry_resumes_once_and_completed_receipt_stays_excluded(
         *,
         finished_at: datetime,
         consumed_event_id: str | None = None,
+        require_blocker_reply: bool = False,
+        blocker_comment_id: str | None = None,
     ) -> JiraDeliveryCandidate:
+        assert require_blocker_reply and blocker_comment_id == "50601"
         matches.append(key)
         return JiraDeliveryCandidate(
-            key, "Updated requirement", f"https://{jira_site}/browse/{key}"
+            key, "Updated requirement", f"https://{jira_site}/browse/{key}", "70001", ("50602",)
         )
 
     class CompletingRunner:
@@ -537,6 +583,8 @@ def test_jira_reentry_resumes_once_and_completed_receipt_stays_excluded(
         ) -> AgentResult:
             current = service.run_store.load(root, run.run_id)
             assert current.attempt == 2 and "Explicit continuation" in prompt
+            assert '"jira_blocker_reply_ids": ["50602"]' in prompt
+            assert current.jira_reentry_id == "70001"
             service.complete(root, workspace_id, current, "Done", phase="handoff")
             return AgentResult(status="succeeded", final_text="Done")
 

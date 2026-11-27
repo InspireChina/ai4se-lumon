@@ -75,6 +75,7 @@ def prepare_resume(
         else run.verification_summary,
         worktree_snapshot=snapshot,
         jira_reentry_id=reentry_id or run.jira_reentry_id,
+        blocker_comment_id=None,
     )
     store.save(workspace, resumed)
     store.restore_history(workspace, run_id)
@@ -97,17 +98,21 @@ def save_checkpoint(
     *,
     detail: str | None = None,
     comment_id: str | None = None,
+    blocker_comment_id: str | None = None,
 ) -> DeliveryRun:
     run = store.load(workspace, run_id)
     if comment_id and run.result_comment_id not in {None, comment_id}:
         raise PreflightError(
             "Reuse the existing Delivery result comment instead of replacing its ID."
         )
+    if blocker_comment_id and run.blocker_comment_id not in {None, blocker_comment_id}:
+        raise PreflightError("Reuse the existing blocker comment for this Delivery attempt.")
     updated = replace(
         run,
         checkpoint=detail[:4000] if detail is not None else run.checkpoint,
         worktree_snapshot=worktree_snapshot(workspace, run.story_key),
         result_comment_id=comment_id or run.result_comment_id,
+        blocker_comment_id=blocker_comment_id or run.blocker_comment_id,
     )
     store.save(workspace, updated)
     return updated

@@ -291,7 +291,8 @@ async def _execute_poll(
     prompt = context_builder.build_prompt(
         context,
         (),
-        _scheduled_poll_prompt(settings, poll.run_id, candidate) + _resume_prompt(resume_run),
+        _scheduled_poll_prompt(settings, poll.run_id, candidate)
+        + _resume_prompt(resume_run, candidate.blocker_reply_ids),
     )
     secrets = (
         config.feishu_app_secret,
@@ -431,6 +432,8 @@ async def _select_delivery(
                 previous.story_key,
                 finished_at=previous.finished_at,
                 consumed_event_id=previous.jira_reentry_id,
+                require_blocker_reply=previous.state == DeliveryState.BLOCKED,
+                blocker_comment_id=previous.blocker_comment_id,
             )
             if candidate is not None:
                 if service.settings_store.load(workspace_id).auto_delivery != settings:
@@ -466,7 +469,7 @@ def _matches_jira_scope(run: DeliveryRun, settings: AutoDeliverySettings) -> boo
     )
 
 
-def _resume_prompt(run: DeliveryRun | None) -> str:
+def _resume_prompt(run: DeliveryRun | None, blocker_reply_ids: tuple[str, ...]) -> str:
     if run is None:
         return ""
     return "\n\n" + render_automation_prompt(
@@ -480,6 +483,7 @@ def _resume_prompt(run: DeliveryRun | None) -> str:
                 "checkpoint": run.checkpoint,
                 "current_worktrees": run.worktree_snapshot,
                 "result_comment_id": run.result_comment_id,
+                "jira_blocker_reply_ids": blocker_reply_ids,
                 "previous_attempt_receipt": (
                     f"lumon/runs/{run.run_id}/attempt-{run.attempt - 1}.json"
                 ),

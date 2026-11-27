@@ -74,6 +74,7 @@ class DeliveryRunStore:
             "worktree_snapshot": run.worktree_snapshot,
             "result_comment_id": run.result_comment_id,
             "jira_reentry_id": run.jira_reentry_id,
+            "blocker_comment_id": run.blocker_comment_id,
         }
         _atomic_write(directory / "run.json", payload)
 
@@ -352,6 +353,7 @@ def _run_from_payload(payload: object, source: Path) -> DeliveryRun:
             worktree_snapshot=_optional_string(values.get("worktree_snapshot"), source),
             result_comment_id=_optional_string(values.get("result_comment_id"), source),
             jira_reentry_id=_optional_string(values.get("jira_reentry_id"), source),
+            blocker_comment_id=_optional_string(values.get("blocker_comment_id"), source),
         )
     except (TypeError, ValueError) as exc:
         raise PreflightError(f"Invalid Delivery run receipt: {source}") from exc
