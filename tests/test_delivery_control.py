@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -236,7 +238,7 @@ def test_dashboard_task_resumes_session_and_acknowledges_stop_only_after_cancell
             PreflightError,
             match="already running|already active|busy|another|lock",
         ):
-            with delivery_lock(state, workspace_id):
+            async with delivery_lock(state, workspace_id):
                 pass
         for _ in range(100):
             if observed:
@@ -428,8 +430,9 @@ def test_poll_does_not_resume_without_post_terminal_jira_reentry(
     assert service.run_store.load(workspace, run.run_id).attempt == 1
 
 
-def test_http_resume_stop_scope_and_stale_attempt_guards(
+def test_http_resume_during_history_refresh_and_stop_guards(
     lab: tuple[Path, Path, UUID, DeliveryService],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, workspace, workspace_id, service = lab
     run = blocked(workspace, workspace_id, service)
@@ -451,14 +454,34 @@ def test_http_resume_stop_scope_and_stale_attempt_guards(
         return cast(AgentRunner, WaitingRunner())
 
     dashboard.delivery_tasks.runner_factory = factory
-    prefix = f"/api/workspaces/{workspace_id}/deliveries/{run.run_id}"
+    history_endpoint = f"/api/workspaces/{workspace_id}/deliveries"
+    prefix = f"{history_endpoint}/{run.run_id}"
+    history_reading = Event()
+    allow_history_to_finish = Event()
+    list_history = dashboard.delivery_service.run_store.list
+
+    def pause_history(workspace_path: Path) -> tuple[DeliveryRun, ...]:
+        history_reading.set()
+        assert allow_history_to_finish.wait(timeout=5)
+        return list_history(workspace_path)
+
+    monkeypatch.setattr(dashboard.delivery_service.run_store, "list", pause_history)
     with TestClient(create_app(dashboard)) as raw_client:
         client = cast(httpx.Client, raw_client)
         assert client.post(prefix + "/resume", json={"attempt": 0}).status_code == 422
-        assert client.post(prefix + "/resume", json={"attempt": 1}).status_code == 202
-        assert client.post(prefix + "/resume", json={"attempt": 1}).status_code == 409
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            refresh = executor.submit(client.get, history_endpoint)
+            try:
+                assert history_reading.wait(timeout=5)
+                assert client.post(prefix + "/resume", json={"attempt": 1}).status_code == 202
+            finally:
+                allow_history_to_finish.set()
+            assert refresh.result(timeout=5).status_code == 200
+        busy = client.post(prefix + "/resume", json={"attempt": 2})
+        assert busy.status_code == 409
+        assert "Another Auto Delivery poll is already running" in busy.text
         assert client.post(prefix + "/stop", json={"attempt": 1}).status_code == 409
-        history = client.get(f"/api/workspaces/{workspace_id}/deliveries").json()
+        history = client.get(history_endpoint).json()
         assert history["runs"][0]["attempt"] == 2 and history["runs"][0]["stopping"] is False
         assert client.post(prefix + "/stop", json={"attempt": 2}).status_code == 202
         foreign = client.post(

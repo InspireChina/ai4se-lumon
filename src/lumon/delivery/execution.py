@@ -53,6 +53,8 @@ async def run_poll(
     resume_run: DeliveryRun | None = None,
     on_started: Callable[[], None] | None = None,
 ) -> AgentResult:
+    """Execute one poll while holding the Workspace delivery lock."""
+
     state_layout = UserStateLayout.from_root(state_root)
     service = DeliveryService(settings_store=WorkspaceSettingsStore(state_layout.root))
     service.recover_interrupted_polls(workspace, workspace_id)
@@ -153,7 +155,7 @@ async def resume_delivery(
     runner_factory: Callable[[AgentConfig], AgentRunner] = create_agent_runner,
 ) -> AgentResult:
     root = UserStateLayout.from_root(state_root).root
-    with delivery_lock(root, workspace_id):
+    async with delivery_lock(root, workspace_id):
         settings = WorkspaceSettingsStore(root).load(workspace_id).auto_delivery
         if not settings.enabled:
             raise PreflightError("Enable Auto Delivery before resuming a Delivery.")

@@ -215,8 +215,9 @@ def poll(
             )
             return
 
-        with delivery_lock(state_layout.root, selected_id):
-            result = asyncio.run(_run_poll(root, selected_id, settings.auto_delivery))
+        result = asyncio.run(
+            _run_poll(root, selected_id, settings.auto_delivery, state_layout.root)
+        )
         safe_text = sanitize_output((result.final_text or "").strip())[:500]
         status = "idle" if safe_text == "AUTO_DELIVERY_IDLE" else "completed"
         _emit_poll(
@@ -287,9 +288,16 @@ def checkpoint(
 
 
 async def _run_poll(
-    workspace: Path, workspace_id: UUID, settings: AutoDeliverySettings
+    workspace: Path, workspace_id: UUID, settings: AutoDeliverySettings, state_root: Path
 ) -> AgentResult:
-    return await run_poll(workspace, workspace_id, settings, runner_factory=create_agent_runner)
+    async with delivery_lock(state_root, workspace_id):
+        return await run_poll(
+            workspace,
+            workspace_id,
+            settings,
+            state_root=state_root,
+            runner_factory=create_agent_runner,
+        )
 
 
 def _parse_workspace_id(value: str) -> UUID:

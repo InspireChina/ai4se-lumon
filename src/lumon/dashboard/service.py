@@ -38,7 +38,11 @@ from lumon.delivery.model import (
     DeliveryRun,
     DeliveryState,
 )
-from lumon.delivery.scheduler import DeliveryScheduler, LaunchdDeliveryScheduler, delivery_lock
+from lumon.delivery.scheduler import (
+    DeliveryScheduler,
+    LaunchdDeliveryScheduler,
+    delivery_receipt_lock,
+)
 from lumon.delivery.service import DeliveryService
 from lumon.errors import (
     AgentConfigError,
@@ -622,20 +626,27 @@ class DashboardService:
         """Read Story history and scheduled checks without disrupting active work."""
 
         workspace = self._require(workspace_id).path
-        with delivery_lock(self.registry.layout.root, workspace_id, skip_if_busy=True) as acquired:
+        store = self.delivery_service.run_store
+        polls = store.list_polls(workspace)
+        if any(
+            poll.workspace_id == workspace_id and poll.state == DeliveryPollState.RUNNING
+            for poll in polls
+        ):
+            with delivery_receipt_lock(
+                self.registry.layout.root, workspace_id, skip_if_busy=True
+            ) as acquired:
+                if acquired:
+                    self.delivery_service.recover_interrupted_polls(workspace, workspace_id)
             if acquired:
-                self.delivery_service.recover_interrupted_polls(workspace, workspace_id)
-            store = self.delivery_service.run_store
-            runs = tuple(
-                run
-                for run in store.list(workspace)
-                if run.workspace_id in {None, workspace_id}
-                and not store.history_deleted(workspace, run.run_id)
-            )
-            polls = tuple(
-                poll for poll in store.list_polls(workspace) if poll.workspace_id == workspace_id
-            )
-            return runs[:50], polls[:50]
+                polls = store.list_polls(workspace)
+        runs = tuple(
+            run
+            for run in store.list(workspace)
+            if run.workspace_id in {None, workspace_id}
+            and not store.history_deleted(workspace, run.run_id)
+        )
+        workspace_polls = tuple(poll for poll in polls if poll.workspace_id == workspace_id)
+        return runs[:50], workspace_polls[:50]
 
     async def resume_delivery(self, workspace_id: UUID, run_id: str, *, attempt: int) -> None:
         await self.delivery_tasks.launch(
@@ -662,7 +673,7 @@ class DashboardService:
         """Soft-delete one finished Story history entry, never an active delivery."""
 
         workspace = self._require(workspace_id).path
-        with delivery_lock(self.registry.layout.root, workspace_id):
+        with delivery_receipt_lock(self.registry.layout.root, workspace_id):
             store = self.delivery_service.run_store
             run = store.load(workspace, run_id)
             if run.workspace_id not in {None, workspace_id}:

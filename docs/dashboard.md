@@ -223,9 +223,10 @@ The poll prompt tells the Agent to pass `--poll-id` to `lumon delivery start`,
 report `implementation`, `verification`, and `handoff` with
 `lumon delivery progress`, and record exactly one terminal outcome. A poll that
 returns without closing its claimed Story is failed, not reported as completed.
-Duplicate starts cannot overwrite a receipt. The existing Workspace poll lock
-also guards interrupted-run recovery; recovery never retries work, changes Jira,
-or sends notifications. An unknown interruption time remains unknown.
+Duplicate starts cannot overwrite a receipt. Dashboard history reads do not
+hold the Workspace execution lock. A separate receipt lock protects recovery
+when a poll still appears to be running. Recovery only updates local records
+and leaves an unknown interruption time unset.
 
 Configure eligibility in the current Workspace's Jira trigger query and delivery
 instructions in its execution prompt. Lumon does not add project-specific Jira

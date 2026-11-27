@@ -93,7 +93,7 @@ class DeliveryService:
         return updated
 
     def recover_interrupted_polls(self, workspace: Path, workspace_id: UUID) -> None:
-        """Only call while holding the poll lock; never retry work or send notifications."""
+        """Recover under the receipt lock without retrying work or sending notifications."""
 
         abandoned: set[str] = set()
         detail = "Auto Delivery was interrupted; no active poll holds the Workspace lock."

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import os
 import plistlib
 import subprocess
 import sys
 import tempfile
-from collections.abc import Generator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Generator, Mapping
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -19,16 +20,35 @@ from lumon.workspace.registry import UserStateLayout
 from lumon.workspace.settings import AutoDeliverySettings, validate_schedule_expression
 
 
-@contextmanager
-def delivery_lock(
-    state_root: Path, workspace_id: UUID, *, skip_if_busy: bool = False
-) -> Generator[bool, None, None]:
-    """Share the existing poll lock with read-side interrupted-run recovery."""
+@asynccontextmanager
+async def delivery_lock(state_root: Path, workspace_id: UUID) -> AsyncGenerator[None]:
+    """Admit a single execution and wait for any in-flight receipt updates."""
 
+    with _delivery_lock(state_root, f"delivery-execution-{workspace_id}", skip_if_busy=False):
+        while True:
+            with delivery_receipt_lock(state_root, workspace_id, skip_if_busy=True) as acquired:
+                if acquired:
+                    yield
+                    return
+            await asyncio.sleep(0.05)
+
+
+def delivery_receipt_lock(
+    state_root: Path, workspace_id: UUID, *, skip_if_busy: bool = False
+) -> AbstractContextManager[bool]:
+    """Keep the existing lock file so older workers still protect their receipts."""
+
+    return _delivery_lock(state_root, f"delivery-{workspace_id}", skip_if_busy=skip_if_busy)
+
+
+@contextmanager
+def _delivery_lock(
+    state_root: Path, lock_name: str, *, skip_if_busy: bool
+) -> Generator[bool, None, None]:
     directory = state_root / "locks"
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o700)
-    with (directory / f"delivery-{workspace_id}.lock").open("a+") as stream:
+    with (directory / f"{lock_name}.lock").open("a+") as stream:
         os.fchmod(stream.fileno(), 0o600)
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -22,7 +23,7 @@ from lumon.delivery.model import (
     DeliveryRun,
     DeliveryState,
 )
-from lumon.delivery.scheduler import delivery_lock
+from lumon.delivery.scheduler import delivery_lock, delivery_receipt_lock
 from lumon.delivery.service import DeliveryService
 from lumon.delivery.store import DeliveryRunStore
 from lumon.errors import PreflightError
@@ -205,7 +206,7 @@ def test_dashboard_live_history_then_recovery_is_workspace_scoped(tmp_path: Path
     )
     foreign = replace(run, run_id="foreign", workspace_id=uuid4())
     store.save(workspace, foreign)
-    with delivery_lock(state, workspace_id):
+    with delivery_receipt_lock(state, workspace_id):
         response = client.get(f"/api/workspaces/{workspace_id}/deliveries")
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
@@ -231,6 +232,27 @@ def test_dashboard_live_history_then_recovery_is_workspace_scoped(tmp_path: Path
         client.get(f"/api/workspaces/{workspace_id}/deliveries/not-found/activity").status_code
         == 409
     )
+
+
+def test_delivery_waits_for_receipt_recovery_without_blocking_other_workspaces(
+    tmp_path: Path,
+) -> None:
+    workspace_id = uuid4()
+
+    async def execute() -> None:
+        async with delivery_lock(tmp_path, workspace_id):
+            pass
+
+    async def exercise() -> None:
+        with delivery_receipt_lock(tmp_path, workspace_id):
+            waiting = asyncio.create_task(execute())
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            async with delivery_lock(tmp_path, uuid4()):
+                assert not waiting.done()
+        await asyncio.wait_for(waiting, timeout=2)
+
+    asyncio.run(exercise())
 
 
 def test_legacy_delivery_receipts_remain_readable(tmp_path: Path) -> None:
@@ -302,7 +324,7 @@ def test_delete_history_rejects_active_work_foreign_ownership_and_invalid_target
     assert not store.history_deleted(workspace, run.run_id)
     finished = replace(run, state=DeliveryState.COMPLETED)
     store.save(workspace, finished)
-    with delivery_lock(dashboard.registry.layout.root, workspace_id):
+    with delivery_receipt_lock(dashboard.registry.layout.root, workspace_id):
         assert client.delete(endpoint).status_code == 409
     poll = DeliveryPoll("parent", workspace_id, DeliveryPollState.RUNNING, run.started_at)
     store.save_poll(workspace, poll)
