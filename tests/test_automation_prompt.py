@@ -47,6 +47,12 @@ def test_delivery_document_preserves_literal_hook_text_and_lifecycle() -> None:
     assert "Write in the Story's language" in blocker
     assert blocker.index("**Blocker**") < blocker.index("**Next action**")
     assert blocker.index("**Next action**") < blocker.index("Lumon Delivery Blocker:")
+    handoff = " ".join(prompt.split("## Durable checkpoint", 1)[1].split())
+    assert "Static output such as generated emails needs screenshots only" in handoff
+    assert "Confirm a supported way to insert Jira native media before writing" in handoff
+    assert "replace those links with inline images in that comment" in handoff
+    assert "stop the handoff before posting a link-only result" in handoff
+    assert "a native file `media` node in a `mediaSingle` for each required screenshot" in handoff
     assert "$instructions" not in prompt
 
 

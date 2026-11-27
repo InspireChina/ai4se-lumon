@@ -430,13 +430,15 @@ worktree and Delivery receipt. The Agent reconciles the
 attempt's marker before retrying a comment write and saves the verified comment ID.
 Failures to publish the comment stay in the local Blocked receipt.
 
-The Agent writes one separate final Jira result comment per successful Delivery.
-Failed, stopped and rework outcomes stay in the local receipt. The Agent uses TWG
-to query and create the comment, or update the verified result for the same run.
-It checks the stable marker and saved comment ID before each write. If native media
-requires the Jira editor, the Agent edits the same comment there. It confirms the
-final comment and any embedded media before calling `lumon delivery complete`.
-The Agent reconciles ambiguous writes before retrying.
+The Agent writes one final Jira result comment per successful Delivery. Failed,
+stopped and rework outcomes stay in the local receipt. It uses TWG to look up the
+saved comment and stable marker, write text-only results, and verify the saved result.
+For authorized visual evidence, it confirms a native insertion route before writing.
+If TWG lacks native insertion, the Agent inserts the images in the authorized Jira
+editor. Static email previews need screenshots only. It verifies native image nodes
+with TWG before completing the handoff. If it cannot embed the images, it retains the
+files and records the handoff blocker. On resume, it repairs the same result comment
+and reconciles ambiguous writes before retrying.
 
 An empty check records an idle poll and makes no Delivery changes. Incomplete,
 denied, invalid or timed-out searches record failure, never idle, and never fall

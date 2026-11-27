@@ -71,10 +71,8 @@ Save redacted screenshots (and a short recording when useful) under this run's
 Workspace artifacts with page/interaction, expected and observed outcome, platform,
 Debug build identity and source revision/diff fingerprint. Recapture affected pages
 after the final change; evidence from an earlier revision is not final proof.
-When the Workspace authorizes Jira evidence, attach the final evidence to the selected
-card and follow the single final result comment policy below.
-Read back attachments/comments before claiming success; report upload failures
-separately from implementation results. Otherwise retain the artifacts locally.
+When the Workspace authorizes Jira evidence, publish it in the single final result
+comment on the selected card as described below. Otherwise keep the artifacts locally.
 Follow Workspace status-transition rules and the publishing policy below.
 
 ## Publishing authorization
@@ -178,19 +176,37 @@ Use the stable marker `Lumon Delivery: delivery-<Story-key>` to reconcile ambigu
 network outcomes. If a write times out, read/reconcile before any retry; do NOT
 blindly create another comment. If identity is ambiguous, block reporting locally.
 
-Create a new result only through `twg jira workitem comment create --issue-id
-<Story-key> --site $jira_site --body-format markdown --body <body>`. Update the
-verified existing result with `twg jira workitem comment update --issue-id
-<Story-key> --id <comment-id> --site $jira_site --body-format markdown --body <body>`
-when the CLI can preserve the required content.
 Keep the comment to: delivered behavior, concise verification, published revision,
 and explicit coverage limits (mock vs real service, platform).
-After verifying the comment exists with the expected marker and numeric ID, save it with
-`lumon delivery checkpoint --run-id <story-run-id> --detail <handoff>
---result-comment-id <id>` before any further edits. For UI work embed one short
-workflow video and 1-3 final key screenshots IN that comment. Use the authorized
-Jira editor to edit that same comment when TWG cannot embed or preserve native media.
-Read back the final comment with TWG and verify rendered media before calling `complete`.
-Never publish obsolete or intermediate evidence. If media or comment write-back fails,
-preserve the checkpoint and block the missing handoff. On continuation, resume the handoff
+
+For a text-only result, use `twg jira workitem comment create --issue-id <Story-key>
+--site $jira_site --body-format markdown --body <body>` or update the same result with
+`twg jira workitem comment update --issue-id <Story-key> --id <comment-id>
+--site $jira_site --body-format markdown --body <body>` if this preserves its content.
+
+For visual evidence, embed 1–3 final screenshots in that comment. Static output such
+as generated emails needs screenshots only. Include a short recording when needed to
+verify an interaction or when the Story requires one.
+
+1. Confirm a supported way to insert Jira native media before writing the result.
+   Use TWG for attachment lookup and read-back. Use it to upload and embed only if the
+   installed CLI supports native insertion for the comment. Otherwise use the authorized
+   Jira editor to insert the files and save the comment together. An attachment upload,
+   Markdown image URL or attachment hyperlink does not embed a Jira image.
+2. Reuse the same result comment and any verified matching media. If an earlier
+   attempt left screenshot links, replace those links with inline images in that
+   comment. Never overwrite embedded media with a TWG text-only edit. If no native
+   insertion route is available, keep the files and stop the handoff before posting
+   a link-only result or claiming completion. State what action failed and which
+   screenshots are still missing from the comment.
+3. Query the saved comment with TWG. Verify the marker, numeric comment ID and a
+   native file `media` node in a `mediaSingle` for each required screenshot. Confirm
+   that the nodes refer to this run's final files. When using the editor, reopen the
+   saved comment and confirm the previews render. Save the verified comment ID with
+   `lumon delivery checkpoint --run-id <story-run-id> --detail <handoff>
+   --result-comment-id <id>` before any further edits or calling `complete`.
+
+Save the verified comment ID for a text-only result in the same way. If a comment was
+saved but media could not be verified, checkpoint its verified ID and report the exact
+handoff blocker. On continuation, repair that comment with the saved final evidence
 without redoing successful implementation or publication. No additional result comments.

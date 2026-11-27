@@ -23,6 +23,9 @@ verification. Re-test changed source or environment and recapture affected UI.
 Reconcile remote commits, Jira transitions, attachments and the single result comment
 before repeating external actions. Never replay old shell commands blindly.
 If already published, continue only missing handoff/reporting steps.
+If the saved result has screenshot links, reuse the final artifacts and replace
+the links with Jira native media in that same comment. Verify the previews before
+completing the handoff.
 Use current instructions over stale session context. Preserve all existing changes.
 Never move the card back into entry conditions to trigger your own retry. Only a
 new human decision may authorize another attempt; do not manufacture Jira re-entry.
