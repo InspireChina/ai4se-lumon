@@ -449,9 +449,11 @@ never reset; if they do not contain the fetched commit, the Agent must resolve t
 divergence safely or block. This is an Agent instruction, not a sandbox that prevents
 an Agent from invoking other Git commands.
 Published modes require validation, scoped commits, remote read-back and, for PR
-mode, a verified PR link. Direct mode never force pushes; a moved/rejected target
-must block. No mode authorizes auto-merge, releases or deployment. Missing tools
-or credentials fail/block instead of triggering automatic credential repair.
+mode, a verified PR link. Direct mode never force pushes. A moved or rejected target
+blocks delivery. Auto Delivery verifies the configured push or PR and leaves automatic
+deployments to repository automation. Auto-merges, releases and manually triggered
+deployment jobs are outside the publishing mode. Missing tools or credentials fail/block
+instead of triggering automatic credential repair.
 
 An eligible Story must use the existing Delivery lifecycle commands so
 the configured Feishu Webhook receives the normal started, completed, failed,

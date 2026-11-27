@@ -217,6 +217,7 @@ def test_dashboard_task_resumes_session_and_acknowledges_stop_only_after_cancell
         ) -> AgentResult:
             assert agent_session_id == run.agent_session_id
             assert "do NOT call start" in prompt and "ONE final Jira result comment" in prompt
+            assert "Leave automatic deployments to the repository." in prompt
             assert "do NOT blindly create" in prompt or "blindly create" in prompt
             assert "twg jira workitem comment query" in prompt
             assert "twg jira workitem comment create" in prompt

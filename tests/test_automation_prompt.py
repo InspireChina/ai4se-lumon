@@ -59,7 +59,10 @@ def test_delivery_uses_explicit_policy_and_selected_story(mode: DeliveryPublishM
     assert 'Target/base branch: "release"' in prompt
     assert "Technical Plan is optional" in prompt
     assert "Preserve the opt-in Flag" in prompt
-    assert "supersedes older hook text" in prompt
+    assert "supersedes older publication instructions" in prompt
+    assert "Do not block publication or handoff on automatic deployments." in " ".join(
+        prompt.split()
+    )
     assert "normal fast-forward push" in prompt
     assert "--branch <verified-target-branch>" in prompt
     assert "not the isolated worktree branch" in prompt

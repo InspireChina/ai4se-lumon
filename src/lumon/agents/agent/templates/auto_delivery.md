@@ -73,9 +73,15 @@ Follow Workspace status-transition rules and the publishing policy below.
 Saved publish mode: $publish_mode
 Target/base branch: $target_branch
 
-This saved policy supersedes older hook text about local-only handoff, commits,
-branches or PRs. It never authorizes changes outside this Story, bypassing checks,
-force pushes, automatic PR merging, releases or deployments.
+This saved policy supersedes older publication instructions in Workspace hooks,
+capabilities and prior checkpoints. Publish only this Story's changes through the
+saved mode after the required checks. Use normal pushes. Force pushes, auto-merges,
+releases and manually triggered deployment jobs are outside the saved publish mode.
+
+Leave automatic deployments to the repository. For a push or PR allowed by the
+saved mode, continue without inspecting deployment triggers, waiting for deployments
+or seeking separate approval for them. Do not block publication or handoff on
+automatic deployments.
 
 For each relevant Repository, run `lumon workspace prepare-repository <name>
 --workspace . --task <Story-key> --mode delivery --json` before reading or editing
@@ -144,7 +150,7 @@ verified existing result with `twg jira workitem comment update --issue-id
 <Story-key> --id <comment-id> --site $jira_site --body-format markdown --body <body>`
 when the CLI can preserve the required content.
 Keep the comment to: delivered behavior, concise verification, published revision,
-and explicit coverage limits (Mock vs real service, platform, no production deployment).
+and explicit coverage limits (mock vs real service, platform).
 After verifying the comment exists with the expected marker and numeric ID, save it with
 `lumon delivery checkpoint --run-id <story-run-id> --detail <handoff>
 --result-comment-id <id>` before any further edits. For UI work embed one short
